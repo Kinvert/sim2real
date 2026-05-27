@@ -30,13 +30,17 @@ class Sample:
         self.right_raw = right_raw
 
 
-def repo_root() -> Path:
+def line_follow_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def build_firmware(root: Path) -> list[str]:
+def pufferlib_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def build_firmware(line_root: Path) -> list[str]:
     result = subprocess.run(
-        [str(root / "scripts/parallax-build-encoder-stream.sh")],
+        [str(line_root / "scripts/parallax-build-encoder-stream.sh")],
         check=True,
         capture_output=True,
         text=True,
@@ -96,14 +100,15 @@ def draw_trace(x: int, y: int, w: int, h: int, values: collections.deque[float],
 
 
 def run(args: argparse.Namespace) -> int:
-    root = repo_root()
+    line_root = line_follow_root()
+    repo_root = pufferlib_root()
     if args.build:
-        build_logs = build_firmware(root)
+        build_logs = build_firmware(line_root)
     else:
         build_logs = []
 
-    loader = root / "tools/parallax/simpleide/opt/parallax/bin/propeller-load"
-    elf = root / "build/parallax-smoke/encoder_stream.elf"
+    loader = repo_root / "tools/parallax/simpleide/opt/parallax/bin/propeller-load"
+    elf = line_root / "build/parallax-smoke/encoder_stream.elf"
     cmd = [
         str(loader),
         "-b",
@@ -117,7 +122,7 @@ def run(args: argparse.Namespace) -> int:
 
     proc = subprocess.Popen(
         cmd,
-        cwd=str(root),
+        cwd=str(line_root),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -227,7 +232,7 @@ def run(args: argparse.Namespace) -> int:
     if args.summary_file:
         summary = Path(args.summary_file)
         if not summary.is_absolute():
-            summary = root / summary
+            summary = line_root / summary
         summary.parent.mkdir(parents=True, exist_ok=True)
         summary.write_text(
             "\n".join(

@@ -3,9 +3,9 @@ set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/parallax-env.sh"
 
-OUT_DIR="$SIM2REAL_ROOT/build/parallax-smoke"
-SRC="$SIM2REAL_ROOT/firmware/smoke/hello.c"
-OUT="$OUT_DIR/hello.elf"
+OUT_DIR="$LINE_FOLLOW_ROOT/build/parallax-smoke"
+SRC="$LINE_FOLLOW_ROOT/firmware/smoke/encoder_stream.c"
+OUT="$OUT_DIR/encoder_stream.elf"
 
 mkdir -p "$OUT_DIR"
 

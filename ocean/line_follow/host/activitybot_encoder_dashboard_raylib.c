@@ -19,6 +19,10 @@
 #define SIM2REAL_ROOT "."
 #endif
 
+#ifndef LINE_FOLLOW_ROOT
+#define LINE_FOLLOW_ROOT SIM2REAL_ROOT
+#endif
+
 #define TRACE_CAP 4096
 #define LOG_CAP 8
 #define LOG_LEN 192
@@ -454,8 +458,8 @@ static int parse_args(int argc, char **argv, Args *args) {
     static char summary_path[1024];
 
     path_join(loader_path, sizeof(loader_path), SIM2REAL_ROOT, "tools/parallax/simpleide/opt/parallax/bin/propeller-load");
-    path_join(elf_path, sizeof(elf_path), SIM2REAL_ROOT, "build/parallax-smoke/encoder_stream.elf");
-    path_join(summary_path, sizeof(summary_path), SIM2REAL_ROOT, "build/parallax-smoke/encoder-dashboard-raylib-c-last.txt");
+    path_join(elf_path, sizeof(elf_path), LINE_FOLLOW_ROOT, "build/parallax-smoke/encoder_stream.elf");
+    path_join(summary_path, sizeof(summary_path), LINE_FOLLOW_ROOT, "build/parallax-smoke/encoder-dashboard-raylib-c-last.txt");
 
     args->port = env_default("PROPELLER_LOAD_PORT", "/dev/ttyUSB0");
     args->board = env_default("PROPELLER_LOAD_BOARD", "activityboard");
@@ -513,7 +517,7 @@ int main(int argc, char **argv) {
     }
     if (!file_exists(args.elf)) {
         fprintf(stderr, "encoder stream ELF not found: %s\n", args.elf);
-        fprintf(stderr, "Run scripts/parallax-build-encoder-stream.sh first.\n");
+        fprintf(stderr, "Run ocean/line_follow/scripts/parallax-build-encoder-stream.sh first.\n");
         return 2;
     }
 

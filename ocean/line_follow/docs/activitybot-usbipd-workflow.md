@@ -4,12 +4,24 @@ This note covers the annoying part of the current g240 workflow: the ActivityBot
 USB serial adapter is physically plugged into the Windows 11 host, while training,
 firmware builds, and Codex live in g240 WSL2.
 
+After the line-following project relocation, commands in this document assume
+the current directory is:
+
+```bash
+cd /home/claude/sim2real/ocean/line_follow
+```
+
+The PufferLib repository root is still `/home/claude/sim2real`; repo-level
+dependencies such as `.venv`, `raylib-5.5_linux_amd64`, and
+`tools/parallax/simpleide` remain there.
+
 ## Current Working Path
 
 ```text
 5090 workstation
   -> SSH into g240 WSL2
-  -> Propeller GCC / propeller-load in /home/claude/sim2real
+  -> Propeller GCC / propeller-load from /home/claude/sim2real tools
+  -> line-following support in /home/claude/sim2real/ocean/line_follow
   -> /dev/ttyUSB0 in WSL
   -> usbipd-win USB/IP bridge
   -> g240 Windows USB host
@@ -128,7 +140,7 @@ When this works, the ActivityBot / FTDI RX/TX LEDs blink.
 The current verified raylib display demo is:
 
 ```bash
-DISPLAY=:0 sg dialout -c 'cd /home/claude/sim2real && .venv/bin/python scripts/activitybot-encoder-dashboard-raylib.py --port /dev/ttyUSB0 --seconds 180'
+DISPLAY=:0 sg dialout -c 'cd /home/claude/sim2real/ocean/line_follow && /home/claude/sim2real/.venv/bin/python scripts/activitybot-encoder-dashboard-raylib.py --port /dev/ttyUSB0 --seconds 180'
 ```
 
 The successful run loaded RAM-only firmware, verified RAM OK, opened a raylib
@@ -186,8 +198,8 @@ Observed successful output:
 
 ```text
 text    data     bss     dec     hex filename
-7924     240     208    8372    20b4 /home/claude/sim2real/build/parallax-smoke/hello.elf
-Built /home/claude/sim2real/build/parallax-smoke/hello.elf
+7924     240     208    8372    20b4 /home/claude/sim2real/ocean/line_follow/build/parallax-smoke/hello.elf
+Built /home/claude/sim2real/ocean/line_follow/build/parallax-smoke/hello.elf
 ```
 
 Check WSL serial visibility:
@@ -231,7 +243,7 @@ Observed successful output:
 
 ```text
 Propeller Version 1 on /dev/ttyUSB0
-Loading /home/claude/sim2real/build/parallax-smoke/hello.elf to hub memory
+Loading /home/claude/sim2real/ocean/line_follow/build/parallax-smoke/hello.elf to hub memory
 8164 bytes sent
 Verifying RAM ... OK
 [ Entering terminal mode. Type ESC or Control-C to exit. ]
@@ -268,8 +280,8 @@ Observed successful output:
 
 ```text
 text    data     bss     dec     hex filename
-8216     360     236    8812    226c /home/claude/sim2real/build/parallax-smoke/encoder_monitor.elf
-Built /home/claude/sim2real/build/parallax-smoke/encoder_monitor.elf
+8216     360     236    8812    226c /home/claude/sim2real/ocean/line_follow/build/parallax-smoke/encoder_monitor.elf
+Built /home/claude/sim2real/ocean/line_follow/build/parallax-smoke/encoder_monitor.elf
 ```
 
 Run the direct encoder monitor:
@@ -298,8 +310,8 @@ Observed successful output:
 
 ```text
 text    data     bss     dec     hex filename
-8236     244     236    8716    220c /home/claude/sim2real/build/parallax-smoke/encoder_stream.elf
-Built /home/claude/sim2real/build/parallax-smoke/encoder_stream.elf
+8236     244     236    8716    220c /home/claude/sim2real/ocean/line_follow/build/parallax-smoke/encoder_stream.elf
+Built /home/claude/sim2real/ocean/line_follow/build/parallax-smoke/encoder_stream.elf
 ```
 
 Install raylib into the local venv:
@@ -328,7 +340,7 @@ PY
 Run the raylib encoder dashboard on g240 display 0:
 
 ```bash
-DISPLAY=:0 sg dialout -c 'cd /home/claude/sim2real && .venv/bin/python scripts/activitybot-encoder-dashboard-raylib.py --port /dev/ttyUSB0 --seconds 180'
+DISPLAY=:0 sg dialout -c 'cd /home/claude/sim2real/ocean/line_follow && /home/claude/sim2real/.venv/bin/python scripts/activitybot-encoder-dashboard-raylib.py --port /dev/ttyUSB0 --seconds 180'
 ```
 
 Observed successful raylib/display output:
@@ -491,7 +503,7 @@ Daily workflow would become:
 ```bash
 activitybot-usb-reset
 timeout 12s sudo -n scripts/parallax-run-smoke.sh /dev/ttyUSB0
-DISPLAY=:0 sg dialout -c 'cd /home/claude/sim2real && .venv/bin/python scripts/activitybot-encoder-dashboard-raylib.py --port /dev/ttyUSB0 --seconds 180'
+DISPLAY=:0 sg dialout -c 'cd /home/claude/sim2real/ocean/line_follow && /home/claude/sim2real/.venv/bin/python scripts/activitybot-encoder-dashboard-raylib.py --port /dev/ttyUSB0 --seconds 180'
 ```
 
 Pros:

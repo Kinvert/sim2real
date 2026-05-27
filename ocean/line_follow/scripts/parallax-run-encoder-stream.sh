@@ -4,10 +4,10 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/parallax-env.sh"
 
 PORT="${1:-${PROPELLER_LOAD_PORT:-/dev/ttyUSB0}}"
-ELF="$SIM2REAL_ROOT/build/parallax-smoke/hello.elf"
+ELF="$LINE_FOLLOW_ROOT/build/parallax-smoke/encoder_stream.elf"
 
 if [[ ! -f "$ELF" ]]; then
-  "$SIM2REAL_ROOT/scripts/parallax-build-smoke.sh"
+  "$LINE_FOLLOW_ROOT/scripts/parallax-build-encoder-stream.sh"
 fi
 
 echo "Loading $ELF to RAM on $PORT using board $PROPELLER_LOAD_BOARD"
