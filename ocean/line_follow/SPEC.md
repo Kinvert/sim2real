@@ -191,7 +191,8 @@ between outer tire faces rather than wheel contact centerlines, update
 wheel contact spacing.
 
 Current retrain defaults randomize both forward and lateral QTI positions by
-`0.005 m` to reflect the measured build imprecision. Sensor failure
+`0.0025 m` to reflect measured build imprecision without overwhelming the
+nominal sensor geometry. Sensor failure
 randomization is intentionally left out of the next retrain.
 
 The current top-down renderer still uses visual placeholders for unmeasured
@@ -475,9 +476,13 @@ When derived `dt` changes, `max_steps` and `lost_line_limit` are scaled
 inversely so larger/slower models do not receive extra wall-clock episode time
 or lost-line grace. The current `max_wheel_speed_mps = 0.010` keeps full-speed
 travel near 0.65 mm per default H8/L0 policy decision. `progress_reward_scale =
-64.0` keeps forward progress meaningful at that low speed. `firmware_loop_ms =
-25` is a separate firmware-build constant: it is the requested Propeller pause
-after each loop, not the canonical sim `dt`.
+2.0`, `time_penalty = 0.02`, and `idle_penalty = 0.02` keep centered forward
+progress positive while making stopped or crawling policies lose reward. The env also pays a
+centerline-quality bonus every `centerline_reward_interval_m = 0.025` meters of
+true progress, penalizes turn command magnitude, and penalizes both wheel
+commands being idle. `firmware_loop_ms = 25` is a separate firmware-build
+constant: it is the requested Propeller pause after each loop, not the canonical
+sim `dt`.
 
 ## QTI Sensor Facts
 
@@ -659,12 +664,29 @@ recoverable.
 Per-step reward components:
 
 ```text
-+ progress_delta * progress_scale
-- centerline_reward or -centerline_distance_penalty from privileged true state
++ (progress_delta / 0.025 m) * accuracy_score * progress_reward_scale
++ every 25 mm of true progress: accuracy_score * centerline_reward_scale
+- optional centerline_distance_penalty from privileged true state
 - heading_error_penalty from privileged track tangent
-- lost_line_penalty when no sensor sees black
+- lost_line_penalty when privileged geometry says the line left the sensor span
 - action_smoothness_penalty for twitchy wheel commands
-- hard terminal with reward `-1.0` if either wheel command is negative
+- turn_penalty for left/right wheel command disagreement
+- time_penalty every tick to discourage crawling or stopping
+- idle_penalty when both post-deadband wheel commands are below threshold
+- negative wheel commands clamp that wheel to stopped and receive
+  reverse_penalty_scale proportional to the negative command amount
++ success_reward on timeout or track completion only if the robot stayed on
+  the line, never idled, and scaled by the episode progress-times-accuracy perf
+```
+
+`accuracy_score` is a simple millimeter-scale centerline score:
+
+```text
+1.0 at <= 5 mm centerline error
+0.9 at 10 mm
+0.8 at 15 mm
+0.7 at 20 mm, where a measured inner sensor is directly over the stripe center
+linear falloff beyond that, clamped to [0, 1]
 ```
 
 Reward should use the true simulated state, not only what the QTI sensors can
@@ -677,7 +699,6 @@ ActivityBot.
 Termination:
 
 ```text
-v_left_cmd < 0 or v_right_cmd < 0
 episode_step >= max_steps
 lost_line_steps >= lost_line_limit
 robot too far from track centerline
@@ -895,6 +916,12 @@ different budget. The eval command loops until the raylib window exits; for a
 bounded render/load smoke check, prefix with `PYTHONUNBUFFERED=1 DISPLAY=:0
 timeout 10s`.
 
+`pufferl eval` uses the normal rollout path. For continuous policies that path
+samples from the Gaussian policy distribution, so the raylib window is useful
+for visual smoke testing but is not a deterministic deployment evaluation. Use
+the benchmark and model-smoke tools below when judging whether a checkpoint is
+actually deployable.
+
 The first default 20M-step V1 probe wrote
 `logs/line_follow/1779931009464.json` and reached `env/perf=0.570`,
 `env/score=0.826`, `env/centerline_error=0.011`, and about `2.0M` final SPS.
@@ -925,13 +952,38 @@ final `env/perf=0.297`, `env/score=0.591`, `env/episode_return=-1.300`,
 `checkpoints/line_follow/1779952610219/0000000199753728.bin`. Bounded
 `DISPLAY=:0` eval loaded the checkpoint successfully. Host smoke still shows
 some negative raw actions on synthetic one-hot cases, but the sim now hard
-terminates negative wheel commands with reward `-1.0`, and host/Propeller
-deployment clamps negative wheel commands to zero ticks. Treat this checkpoint
-as reverse-safe, not yet drive-approved.
+terminates negative wheel commands with reward `-1.0`; current sim versions
+instead clamp negative wheel commands to zero speed and penalize the negative
+command amount, matching host/Propeller deployment clamps. Treat this old
+checkpoint as not drive-approved.
 
 That run predates model-aware dt coupling and used an overlarge feed-forward
 timing target. Retrain before treating the current `dt=0.065` / architecture
 sweep config as evaluated.
+
+The first `sim1` sweep after shrinking the deployable model plateaued near
+`env/perf=0.33`. Investigation found two measurement issues: reset was crediting
+absolute nearest-track progress on closed loops, and the random track lengths
+were large relative to the 1 cm/s robot speed and fixed wall-clock horizon. The
+current metric starts episode progress at zero, bounds per-step progress by
+physical wheel travel, and measures `perf` from the 25 mm progress checkpoints.
+Each checkpoint contributes the current `accuracy_score`. Unreached checkpoints
+in the target progress distance count as zero, so a short-lived episode cannot
+get `perf=1.0` just because its starting pose was centered. If ten checkpoints
+are physically possible during the episode, hitting five with average accuracy
+`0.8` gives `perf = 0.8 * 5 / 10 = 0.4`.
+The highest-reward state is centered over the line even when the narrow stripe is
+between the inner sensors and all four QTI readings are white. Lost-line
+termination uses privileged simulator geometry: the true stripe must leave the
+actual sensor span, independent of noisy or thresholded sensor observations.
+The follow-up failure mode was centered stopping: a policy could park on the
+track and avoid most penalties. The reward now pays accuracy-scaled progress,
+pays accuracy-scaled 25 mm checkpoint bonuses, applies a tiny turn-command
+penalty every step, applies a time penalty every tick, and applies an idle
+penalty unless at least one wheel command is above the small motion threshold.
+Timeout/track-complete success bonuses are scaled by the same progress-times-
+accuracy `perf`, so a centered robot that has not reached checkpoints cannot
+earn a survival bonus.
 
 ## Training Plan
 
@@ -1143,6 +1195,40 @@ same checkpoint and cases, confirming the checkpoint format, weight alignment,
 MinGRU single-step recurrence, decoder output, action clamp/deadband, and wheel
 tick scaling on the robot. Re-run the Propeller fake-observation test for any
 new checkpoint before enabling drive.
+
+## Deterministic Policy Benchmark
+
+For repeatable host-side policy scoring, use the deterministic benchmark:
+
+```text
+ocean/line_follow/scripts/line-follow-policy-benchmark.sh
+```
+
+It builds `ocean/line_follow/host/line_follow_policy_benchmark.c`, loads the
+latest checkpoint by default, uses the native `forward_puffernet` mean action,
+and runs fixed track/start cases. The output is CSV-like and includes:
+
+```text
+case,steps,perf,progress_frac,progress_m,avg_raw_left,avg_raw_right,
+avg_cmd_left_mps,avg_cmd_right_mps,avg_speed_frac,idle_frac,
+all_white_frac,visible_frac,lost,timeout,complete,success,reward
+```
+
+Useful deterministic timing/control probes:
+
+```text
+ocean/line_follow/scripts/line-follow-policy-benchmark.sh --dt 0.025
+ocean/line_follow/scripts/line-follow-policy-benchmark.sh --motor-lag-alpha 1.0
+ocean/line_follow/scripts/line-follow-policy-benchmark.sh --dt 0.025 --motor-lag-alpha 1.0
+```
+
+Current benchmark finding for checkpoint
+`checkpoints/line_follow/1779995626730/0000000199753728.bin`: centered starts
+where the narrow line is between the inner sensors produce `obs=[0,0,0,0]` and
+deterministic mean action `[0,0]`. Smaller `dt` and smaller motor lag do not fix
+that case. This is an observation-aliasing problem for a feed-forward policy:
+all-white can mean either perfectly centered between the inner sensors or lost
+outside the sensor span.
 
 ## Propeller C Live QTI Model Telemetry
 

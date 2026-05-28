@@ -36,9 +36,16 @@ void my_init(Env* env, Dict* kwargs) {
 
     env->progress_reward_scale = dict_get(kwargs, "progress_reward_scale")->value;
     env->centerline_penalty_scale = dict_get(kwargs, "centerline_penalty_scale")->value;
+    env->centerline_reward_interval_m = dict_get(kwargs, "centerline_reward_interval_m")->value;
+    env->centerline_reward_scale = dict_get(kwargs, "centerline_reward_scale")->value;
+    env->success_reward = dict_get(kwargs, "success_reward")->value;
     env->heading_penalty_scale = dict_get(kwargs, "heading_penalty_scale")->value;
     env->lost_line_penalty = dict_get(kwargs, "lost_line_penalty")->value;
     env->action_smoothness_penalty = dict_get(kwargs, "action_smoothness_penalty")->value;
+    env->turn_penalty_scale = dict_get(kwargs, "turn_penalty_scale")->value;
+    env->time_penalty = dict_get(kwargs, "time_penalty")->value;
+    env->idle_penalty = dict_get(kwargs, "idle_penalty")->value;
+    env->min_wheel_action = dict_get(kwargs, "min_wheel_action")->value;
     env->reverse_penalty_scale = dict_get(kwargs, "reverse_penalty_scale")->value;
     env->too_far_m = dict_get(kwargs, "too_far_m")->value;
     env->track_complete_margin_m = dict_get(kwargs, "track_complete_margin_m")->value;
@@ -71,8 +78,25 @@ void my_init(Env* env, Dict* kwargs) {
 void my_log(Log* log, Dict* out) {
     dict_set(out, "perf", log->perf);
     dict_set(out, "score", log->score);
+    dict_set(out, "progress_frac", log->progress_frac);
+    dict_set(out, "distance_progress_frac", log->distance_progress_frac);
+    dict_set(out, "progress_m", log->progress_m);
     dict_set(out, "episode_return", log->episode_return);
     dict_set(out, "episode_length", log->episode_length);
     dict_set(out, "centerline_error", log->centerline_error);
+    dict_set(out, "accuracy", log->accuracy);
+    dict_set(out, "checkpoint_accuracy", log->checkpoint_accuracy);
+    dict_set(out, "checkpoints", log->checkpoints);
+    dict_set(out, "target_checkpoints", log->target_checkpoints);
+    dict_set(out, "progress_target_m", log->progress_target_m);
+    dict_set(out, "avg_forward_speed_mps", log->avg_forward_speed_mps);
+    dict_set(out, "avg_speed_frac", log->avg_speed_frac);
+    dict_set(out, "negative_action_frac", log->negative_action_frac);
+    dict_set(out, "terminal_timeout", log->terminal_timeout);
+    dict_set(out, "terminal_lost_line", log->terminal_lost_line);
+    dict_set(out, "terminal_too_far", log->terminal_too_far);
+    dict_set(out, "terminal_track_complete", log->terminal_track_complete);
+    dict_set(out, "terminal_negative", log->terminal_negative);
+    dict_set(out, "terminal_success", log->terminal_success);
     dict_set(out, "n", log->n);
 }

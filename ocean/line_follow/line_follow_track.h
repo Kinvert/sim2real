@@ -154,7 +154,7 @@ static inline bool generate_straight(LineFollowTrack* track, float length_m,
 
 static inline bool generate_arc(LineFollowTrack* track, float radius_m,
         float angle_rad, float line_width_m, float bounds_m) {
-    radius_m = track_clampf(radius_m, 0.25f, bounds_m * 0.85f);
+    radius_m = track_clampf(radius_m, 0.08f, bounds_m * 0.85f);
     angle_rad = track_clampf(angle_rad, 0.45f, 1.7f);
     track_begin(track, LINE_FOLLOW_TRACK_ARC, bounds_m);
 
@@ -179,8 +179,8 @@ static inline bool generate_arc(LineFollowTrack* track, float radius_m,
 
 static inline bool generate_s_curve(LineFollowTrack* track, float length_m,
         float amplitude_m, float line_width_m, float bounds_m) {
-    length_m = track_clampf(length_m, 0.4f, 1.7f * bounds_m);
-    amplitude_m = track_clampf(amplitude_m, 0.03f, 0.22f * bounds_m);
+    length_m = track_clampf(length_m, 0.2f, 1.7f * bounds_m);
+    amplitude_m = track_clampf(amplitude_m, 0.015f, 0.22f * bounds_m);
     track_begin(track, LINE_FOLLOW_TRACK_S_CURVE, bounds_m);
 
     int samples = (int)ceilf(length_m / LINE_FOLLOW_TRACK_SAMPLE_SPACING_M) + 1;
@@ -202,8 +202,8 @@ static inline bool generate_s_curve(LineFollowTrack* track, float length_m,
 
 static inline bool generate_oval(LineFollowTrack* track, float radius_x_m,
         float radius_y_m, float line_width_m, float bounds_m) {
-    radius_x_m = track_clampf(radius_x_m, 0.2f, bounds_m * 0.75f);
-    radius_y_m = track_clampf(radius_y_m, 0.15f, bounds_m * 0.55f);
+    radius_x_m = track_clampf(radius_x_m, 0.06f, bounds_m * 0.75f);
+    radius_y_m = track_clampf(radius_y_m, 0.035f, bounds_m * 0.55f);
     track_begin(track, LINE_FOLLOW_TRACK_OVAL, bounds_m);
 
     float approx_len = 2.0f * LINE_FOLLOW_PI * sqrtf((radius_x_m * radius_x_m
@@ -238,19 +238,19 @@ static inline bool generate_track(LineFollowTrack* track, unsigned int* rng,
 
     bool ok = false;
     if (chosen == LINE_FOLLOW_TRACK_STRAIGHT) {
-        float length = 0.8f + 0.6f * rand01(rng);
+        float length = 0.25f + 0.25f * rand01(rng);
         ok = generate_straight(track, length, line_width_m, bounds_m);
     } else if (chosen == LINE_FOLLOW_TRACK_ARC) {
-        float radius = 0.35f + 0.25f * rand01(rng);
-        float angle = 0.7f + 0.7f * rand01(rng);
+        float radius = 0.10f + 0.12f * rand01(rng);
+        float angle = 0.7f + 0.8f * rand01(rng);
         ok = generate_arc(track, radius, angle, line_width_m, bounds_m);
     } else if (chosen == LINE_FOLLOW_TRACK_S_CURVE) {
-        float length = 0.9f + 0.35f * rand01(rng);
-        float amp = 0.08f + 0.06f * rand01(rng);
+        float length = 0.30f + 0.25f * rand01(rng);
+        float amp = 0.025f + 0.045f * rand01(rng);
         ok = generate_s_curve(track, length, amp, line_width_m, bounds_m);
     } else if (chosen == LINE_FOLLOW_TRACK_OVAL) {
-        float rx = 0.35f + 0.20f * rand01(rng);
-        float ry = 0.22f + 0.12f * rand01(rng);
+        float rx = 0.075f + 0.045f * rand01(rng);
+        float ry = 0.045f + 0.035f * rand01(rng);
         ok = generate_oval(track, rx, ry, line_width_m, bounds_m);
     }
 
