@@ -155,6 +155,45 @@ If the real wiring ends up in a different physical order, robot-side code should
 reorder the pins before passing observations into the policy. The policy should
 not need to know board pin numbers.
 
+## Measured ActivityBot Geometry
+
+Robot pose is modeled at the center of the drive axle. Body-frame coordinates
+use `forward_m` along the robot heading and `lateral_m` positive to the robot's
+left.
+
+Measured dimensions from the current robot:
+
+```text
+tire-to-tire width:               125 mm = 0.125 m
+tire diameter:                     65 mm = 0.065 m
+body behind axle:                  90 mm = 0.090 m
+body ahead of axle:                40 mm = 0.040 m
+total body length around axle:    130 mm = 0.130 m
+QTI sensor forward offset:         35 mm = 0.035 m ahead of axle
+inner QTI lateral offsets:        +/-20 mm = +/-0.020 m from robot centerline
+outer QTI lateral offsets:        +/-40 mm = +/-0.040 m from robot centerline
+outer-left to outer-right spread:  80 mm = 0.080 m
+```
+
+Nominal QTI body-frame positions:
+
+```text
+outer_left   = (forward_m = 0.035, lateral_m =  0.040)
+inner_left   = (forward_m = 0.035, lateral_m =  0.020)
+inner_right  = (forward_m = 0.035, lateral_m = -0.020)
+outer_right  = (forward_m = 0.035, lateral_m = -0.040)
+```
+
+The sim and renderer should treat these as the nominal geometry before applying
+episode randomization. If the "tire-to-tire width" later proves to be measured
+between outer tire faces rather than wheel contact centerlines, update
+`wheel_base_m` separately; the differential-drive model needs center-to-center
+wheel contact spacing.
+
+The current top-down renderer still uses visual placeholders for unmeasured
+widths: `body_width_m = 0.075` and `tire_width_m = 0.012`. These affect only
+the debug drawing, not the kinematics or QTI sensor positions.
+
 ## Units
 
 The sim should use SI units internally:
@@ -436,13 +475,13 @@ Official Parallax sources imply these constraints:
 There are four downward-facing QTI sensors rigidly attached to the robot. Sensor
 world positions are computed from robot pose and randomized body-frame offsets.
 
-Nominal body-frame layout:
+Nominal body-frame layout uses the measured axle-centered coordinates above:
 
 ```text
-outer_left   x = -sensor_outer_x, y = sensor_forward_y
-inner_left   x = -sensor_inner_x, y = sensor_forward_y
-inner_right  x =  sensor_inner_x, y = sensor_forward_y
-outer_right  x =  sensor_outer_x, y = sensor_forward_y
+outer_left   forward = sensor_forward_m, lateral =  sensor_outer_lateral_m
+inner_left   forward = sensor_forward_m, lateral =  sensor_inner_lateral_m
+inner_right  forward = sensor_forward_m, lateral = -sensor_inner_lateral_m
+outer_right  forward = sensor_forward_m, lateral = -sensor_outer_lateral_m
 ```
 
 Each sensor samples local surface reflectance under a small footprint, not just
@@ -662,8 +701,13 @@ The raylib renderer should show:
 
 - White floor.
 - Black line.
-- Robot body.
-- Four sensor positions.
+- Robot body with the drive axle at the simulated pose, 90 mm of body behind
+  the axle, and 40 mm of body ahead of it.
+- Tires/wheels as top-down black bars, placed from the measured 125 mm
+  tire-to-tire width. The measured 65 mm tire diameter is the fore/aft length
+  of each bar in the top-down view.
+- Four sensor positions using the measured 35 mm forward offset and
+  +/-20 mm / +/-40 mm lateral offsets.
 - Sensor positions, normalized QTI levels, and thresholded black/white debug
   state.
 - Recent trajectory.
@@ -914,9 +958,10 @@ Before final deployment tuning, measure or confirm:
 - Whether the Propeller C deployment should use `rc_time(pin, 1)` raw readings,
   the Blockly-style 230 us fixed-timing digital read, or both.
 - Per-sensor calibration values for white and black normalization.
-- Sensor lateral spacing.
-- Sensor forward offset from wheel axle.
-- Wheelbase.
+- Whether the measured 125 mm tire-to-tire width is wheel contact centerline
+  spacing or outer tire-face spacing.
+- Body width and top-down tire/tread width if render proportions need to match
+  the physical chassis more closely.
 - ActivityBot ticks/second speed range that is reliable on paper.
 - How fast the control loop can run while reading QTI and commanding wheels.
 - Whether `abdrive.h` or `abdrive360.h` is the correct library for this specific

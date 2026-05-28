@@ -49,23 +49,23 @@ typedef struct {
     int segment_idx;
 } LineFollowNearest;
 
-static inline float line_follow_track_clampf(float value, float lo, float hi) {
+static inline float track_clampf(float value, float lo, float hi) {
     if (value < lo) return lo;
     if (value > hi) return hi;
     return value;
 }
 
-static inline float line_follow_track_rand01(unsigned int* rng) {
+static inline float rand01(unsigned int* rng) {
     return (float)rand_r(rng) / (float)RAND_MAX;
 }
 
-static inline void line_follow_track_begin(LineFollowTrack* track, int family, float bounds_m) {
+static inline void track_begin(LineFollowTrack* track, int family, float bounds_m) {
     memset(track, 0, sizeof(*track));
     track->family = family;
     track->bounds_m = bounds_m;
 }
 
-static inline bool line_follow_track_push(LineFollowTrack* track, float x, float y,
+static inline bool track_push(LineFollowTrack* track, float x, float y,
         float line_width_m, float black_reflectance) {
     if (track->sample_count >= LINE_FOLLOW_MAX_TRACK_SAMPLES) {
         return false;
@@ -79,7 +79,7 @@ static inline bool line_follow_track_push(LineFollowTrack* track, float x, float
     return true;
 }
 
-static inline bool line_follow_track_finalize(LineFollowTrack* track) {
+static inline bool track_finalize(LineFollowTrack* track) {
     if (track->sample_count < 2) {
         return false;
     }
@@ -115,7 +115,7 @@ static inline bool line_follow_track_finalize(LineFollowTrack* track) {
     return track->length_m > 1e-5f;
 }
 
-static inline bool line_follow_track_in_bounds(const LineFollowTrack* track, float bounds_m) {
+static inline bool track_in_bounds(const LineFollowTrack* track, float bounds_m) {
     if (track->sample_count < 2 || track->sample_count > LINE_FOLLOW_MAX_TRACK_SAMPLES) {
         return false;
     }
@@ -128,10 +128,10 @@ static inline bool line_follow_track_in_bounds(const LineFollowTrack* track, flo
     return true;
 }
 
-static inline bool line_follow_track_generate_straight(LineFollowTrack* track, float length_m,
+static inline bool generate_straight(LineFollowTrack* track, float length_m,
         float line_width_m, float bounds_m) {
-    length_m = line_follow_track_clampf(length_m, 0.2f, 2.0f * bounds_m);
-    line_follow_track_begin(track, LINE_FOLLOW_TRACK_STRAIGHT, bounds_m);
+    length_m = track_clampf(length_m, 0.2f, 2.0f * bounds_m);
+    track_begin(track, LINE_FOLLOW_TRACK_STRAIGHT, bounds_m);
 
     int samples = (int)ceilf(length_m / LINE_FOLLOW_TRACK_SAMPLE_SPACING_M) + 1;
     if (samples > LINE_FOLLOW_MAX_TRACK_SAMPLES) {
@@ -144,19 +144,19 @@ static inline bool line_follow_track_generate_straight(LineFollowTrack* track, f
     for (int i = 0; i < samples; i++) {
         float t = samples == 1 ? 0.0f : (float)i / (float)(samples - 1);
         float x = (t - 0.5f) * length_m;
-        if (!line_follow_track_push(track, x, 0.0f, line_width_m, 1.0f)) {
+        if (!track_push(track, x, 0.0f, line_width_m, 1.0f)) {
             return false;
         }
     }
 
-    return line_follow_track_finalize(track) && line_follow_track_in_bounds(track, bounds_m);
+    return track_finalize(track) && track_in_bounds(track, bounds_m);
 }
 
-static inline bool line_follow_track_generate_arc(LineFollowTrack* track, float radius_m,
+static inline bool generate_arc(LineFollowTrack* track, float radius_m,
         float angle_rad, float line_width_m, float bounds_m) {
-    radius_m = line_follow_track_clampf(radius_m, 0.25f, bounds_m * 0.85f);
-    angle_rad = line_follow_track_clampf(angle_rad, 0.45f, 1.7f);
-    line_follow_track_begin(track, LINE_FOLLOW_TRACK_ARC, bounds_m);
+    radius_m = track_clampf(radius_m, 0.25f, bounds_m * 0.85f);
+    angle_rad = track_clampf(angle_rad, 0.45f, 1.7f);
+    track_begin(track, LINE_FOLLOW_TRACK_ARC, bounds_m);
 
     float length_m = radius_m * angle_rad;
     int samples = (int)ceilf(length_m / LINE_FOLLOW_TRACK_SAMPLE_SPACING_M) + 1;
@@ -169,19 +169,19 @@ static inline bool line_follow_track_generate_arc(LineFollowTrack* track, float 
         float phi = (t - 0.5f) * angle_rad;
         float x = radius_m * sinf(phi);
         float y = radius_m * (1.0f - cosf(phi));
-        if (!line_follow_track_push(track, x, y, line_width_m, 1.0f)) {
+        if (!track_push(track, x, y, line_width_m, 1.0f)) {
             return false;
         }
     }
 
-    return line_follow_track_finalize(track) && line_follow_track_in_bounds(track, bounds_m);
+    return track_finalize(track) && track_in_bounds(track, bounds_m);
 }
 
-static inline bool line_follow_track_generate_s_curve(LineFollowTrack* track, float length_m,
+static inline bool generate_s_curve(LineFollowTrack* track, float length_m,
         float amplitude_m, float line_width_m, float bounds_m) {
-    length_m = line_follow_track_clampf(length_m, 0.4f, 1.7f * bounds_m);
-    amplitude_m = line_follow_track_clampf(amplitude_m, 0.03f, 0.22f * bounds_m);
-    line_follow_track_begin(track, LINE_FOLLOW_TRACK_S_CURVE, bounds_m);
+    length_m = track_clampf(length_m, 0.4f, 1.7f * bounds_m);
+    amplitude_m = track_clampf(amplitude_m, 0.03f, 0.22f * bounds_m);
+    track_begin(track, LINE_FOLLOW_TRACK_S_CURVE, bounds_m);
 
     int samples = (int)ceilf(length_m / LINE_FOLLOW_TRACK_SAMPLE_SPACING_M) + 1;
     if (samples > LINE_FOLLOW_MAX_TRACK_SAMPLES) {
@@ -192,19 +192,19 @@ static inline bool line_follow_track_generate_s_curve(LineFollowTrack* track, fl
         float t = (float)i / (float)(samples - 1);
         float x = (t - 0.5f) * length_m;
         float y = amplitude_m * sinf(2.0f * LINE_FOLLOW_PI * t);
-        if (!line_follow_track_push(track, x, y, line_width_m, 1.0f)) {
+        if (!track_push(track, x, y, line_width_m, 1.0f)) {
             return false;
         }
     }
 
-    return line_follow_track_finalize(track) && line_follow_track_in_bounds(track, bounds_m);
+    return track_finalize(track) && track_in_bounds(track, bounds_m);
 }
 
-static inline bool line_follow_track_generate_oval(LineFollowTrack* track, float radius_x_m,
+static inline bool generate_oval(LineFollowTrack* track, float radius_x_m,
         float radius_y_m, float line_width_m, float bounds_m) {
-    radius_x_m = line_follow_track_clampf(radius_x_m, 0.2f, bounds_m * 0.75f);
-    radius_y_m = line_follow_track_clampf(radius_y_m, 0.15f, bounds_m * 0.55f);
-    line_follow_track_begin(track, LINE_FOLLOW_TRACK_OVAL, bounds_m);
+    radius_x_m = track_clampf(radius_x_m, 0.2f, bounds_m * 0.75f);
+    radius_y_m = track_clampf(radius_y_m, 0.15f, bounds_m * 0.55f);
+    track_begin(track, LINE_FOLLOW_TRACK_OVAL, bounds_m);
 
     float approx_len = 2.0f * LINE_FOLLOW_PI * sqrtf((radius_x_m * radius_x_m
         + radius_y_m * radius_y_m) * 0.5f);
@@ -221,15 +221,15 @@ static inline bool line_follow_track_generate_oval(LineFollowTrack* track, float
         float theta = 2.0f * LINE_FOLLOW_PI * t;
         float x = radius_x_m * cosf(theta);
         float y = radius_y_m * sinf(theta);
-        if (!line_follow_track_push(track, x, y, line_width_m, 1.0f)) {
+        if (!track_push(track, x, y, line_width_m, 1.0f)) {
             return false;
         }
     }
 
-    return line_follow_track_finalize(track) && line_follow_track_in_bounds(track, bounds_m);
+    return track_finalize(track) && track_in_bounds(track, bounds_m);
 }
 
-static inline bool line_follow_track_generate(LineFollowTrack* track, unsigned int* rng,
+static inline bool generate_track(LineFollowTrack* track, unsigned int* rng,
         int family, float line_width_m, float bounds_m) {
     int chosen = family;
     if (chosen == LINE_FOLLOW_TRACK_RANDOM) {
@@ -238,29 +238,29 @@ static inline bool line_follow_track_generate(LineFollowTrack* track, unsigned i
 
     bool ok = false;
     if (chosen == LINE_FOLLOW_TRACK_STRAIGHT) {
-        float length = 0.8f + 0.6f * line_follow_track_rand01(rng);
-        ok = line_follow_track_generate_straight(track, length, line_width_m, bounds_m);
+        float length = 0.8f + 0.6f * rand01(rng);
+        ok = generate_straight(track, length, line_width_m, bounds_m);
     } else if (chosen == LINE_FOLLOW_TRACK_ARC) {
-        float radius = 0.35f + 0.25f * line_follow_track_rand01(rng);
-        float angle = 0.7f + 0.7f * line_follow_track_rand01(rng);
-        ok = line_follow_track_generate_arc(track, radius, angle, line_width_m, bounds_m);
+        float radius = 0.35f + 0.25f * rand01(rng);
+        float angle = 0.7f + 0.7f * rand01(rng);
+        ok = generate_arc(track, radius, angle, line_width_m, bounds_m);
     } else if (chosen == LINE_FOLLOW_TRACK_S_CURVE) {
-        float length = 0.9f + 0.35f * line_follow_track_rand01(rng);
-        float amp = 0.08f + 0.06f * line_follow_track_rand01(rng);
-        ok = line_follow_track_generate_s_curve(track, length, amp, line_width_m, bounds_m);
+        float length = 0.9f + 0.35f * rand01(rng);
+        float amp = 0.08f + 0.06f * rand01(rng);
+        ok = generate_s_curve(track, length, amp, line_width_m, bounds_m);
     } else if (chosen == LINE_FOLLOW_TRACK_OVAL) {
-        float rx = 0.35f + 0.20f * line_follow_track_rand01(rng);
-        float ry = 0.22f + 0.12f * line_follow_track_rand01(rng);
-        ok = line_follow_track_generate_oval(track, rx, ry, line_width_m, bounds_m);
+        float rx = 0.35f + 0.20f * rand01(rng);
+        float ry = 0.22f + 0.12f * rand01(rng);
+        ok = generate_oval(track, rx, ry, line_width_m, bounds_m);
     }
 
     if (!ok) {
-        ok = line_follow_track_generate_straight(track, bounds_m * 1.2f, line_width_m, bounds_m);
+        ok = generate_straight(track, bounds_m * 1.2f, line_width_m, bounds_m);
     }
     return ok;
 }
 
-static inline LineFollowNearest line_follow_track_nearest(const LineFollowTrack* track,
+static inline LineFollowNearest nearest_track(const LineFollowTrack* track,
         float x, float y) {
     LineFollowNearest best;
     memset(&best, 0, sizeof(best));
@@ -284,7 +284,7 @@ static inline LineFollowNearest line_follow_track_nearest(const LineFollowTrack*
 
         float wx = x - a->x;
         float wy = y - a->y;
-        float t = line_follow_track_clampf((wx * vx + wy * vy) / len2, 0.0f, 1.0f);
+        float t = track_clampf((wx * vx + wy * vy) / len2, 0.0f, 1.0f);
         float px = a->x + t * vx;
         float py = a->y + t * vy;
         float dx = x - px;
@@ -311,7 +311,7 @@ static inline LineFollowNearest line_follow_track_nearest(const LineFollowTrack*
     return best;
 }
 
-static inline float line_follow_track_coverage(float signed_lateral_m,
+static inline float line_coverage(float signed_lateral_m,
         float line_width_m, float edge_softness_m) {
     float dist = fabsf(signed_lateral_m);
     float half_width = 0.5f * line_width_m;
@@ -333,7 +333,7 @@ static inline float line_follow_track_coverage(float signed_lateral_m,
     return 1.0f - smooth;
 }
 
-static inline float line_follow_angle_diff(float a, float b) {
+static inline float angle_diff(float a, float b) {
     float d = a - b;
     while (d > LINE_FOLLOW_PI) d -= 2.0f * LINE_FOLLOW_PI;
     while (d < -LINE_FOLLOW_PI) d += 2.0f * LINE_FOLLOW_PI;

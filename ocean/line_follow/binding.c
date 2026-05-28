@@ -9,13 +9,18 @@
 #include "vecenv.h"
 
 void my_init(Env* env, Dict* kwargs) {
-    line_follow_set_defaults(env);
+    set_defaults(env);
     env->num_agents = 1;
 
     env->dt = dict_get(kwargs, "dt")->value;
     env->max_steps = dict_get(kwargs, "max_steps")->value;
     env->max_wheel_speed_mps = dict_get(kwargs, "max_wheel_speed_mps")->value;
     env->wheel_base_m = dict_get(kwargs, "wheel_base_m")->value;
+    env->body_ahead_m = dict_get(kwargs, "body_ahead_m")->value;
+    env->body_behind_m = dict_get(kwargs, "body_behind_m")->value;
+    env->body_width_m = dict_get(kwargs, "body_width_m")->value;
+    env->tire_diameter_m = dict_get(kwargs, "tire_diameter_m")->value;
+    env->tire_width_m = dict_get(kwargs, "tire_width_m")->value;
     env->motor_lag_alpha = dict_get(kwargs, "motor_lag_alpha")->value;
     env->command_deadband = dict_get(kwargs, "command_deadband")->value;
     env->left_speed_scale = dict_get(kwargs, "left_speed_scale")->value;

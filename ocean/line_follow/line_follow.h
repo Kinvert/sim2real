@@ -63,6 +63,11 @@ struct LineFollow {
     float dt;
     float max_wheel_speed_mps;
     float wheel_base_m;
+    float body_ahead_m;
+    float body_behind_m;
+    float body_width_m;
+    float tire_diameter_m;
+    float tire_width_m;
     float motor_lag_alpha;
     float command_deadband;
     float left_speed_scale;
@@ -70,7 +75,7 @@ struct LineFollow {
 
     float robot_x;
     float robot_y;
-    float robot_theta;
+    float robot_theta; // theta=0 means facing along the positive x-axis, increasing counterclockwise
     float v_left;
     float v_right;
     float v_left_cmd;
@@ -124,18 +129,18 @@ struct LineFollow {
     int trajectory_count;
 };
 
-static inline float line_follow_clampf(float value, float lo, float hi) {
+static inline float clampf(float value, float lo, float hi) {
     if (!isfinite(value)) return 0.0f;
     if (value < lo) return lo;
     if (value > hi) return hi;
     return value;
 }
 
-static inline float line_follow_rand_signed(unsigned int* rng) {
+static inline float rand_signed(unsigned int* rng) {
     return 2.0f * ((float)rand_r(rng) / (float)RAND_MAX) - 1.0f;
 }
 
-void line_follow_set_defaults(LineFollow* env) {
+void set_defaults(LineFollow* env) {
     env->num_agents = 1;
     env->max_steps = 600;
     env->lost_line_limit = 30;
@@ -144,7 +149,12 @@ void line_follow_set_defaults(LineFollow* env) {
 
     env->dt = 0.05f;
     env->max_wheel_speed_mps = 0.35f;
-    env->wheel_base_m = 0.105f;
+    env->wheel_base_m = 0.125f;
+    env->body_ahead_m = 0.040f;
+    env->body_behind_m = 0.090f;
+    env->body_width_m = 0.075f;
+    env->tire_diameter_m = 0.065f;
+    env->tire_width_m = 0.012f;
     env->motor_lag_alpha = 0.65f;
     env->command_deadband = 0.04f;
     env->left_speed_scale = 1.0f;
@@ -159,9 +169,9 @@ void line_follow_set_defaults(LineFollow* env) {
     env->too_far_m = 0.09f;
     env->track_complete_margin_m = 0.06f;
 
-    env->sensor_forward_m = 0.055f;
-    env->sensor_inner_lateral_m = 0.012f;
-    env->sensor_outer_lateral_m = 0.035f;
+    env->sensor_forward_m = 0.035f;
+    env->sensor_inner_lateral_m = 0.020f;
+    env->sensor_outer_lateral_m = 0.040f;
     env->sensor_lateral_jitter_m = 0.0f;
     env->sensor_forward_jitter_m = 0.0f;
     env->sensor_noise_std = 0.0f;
@@ -210,7 +220,7 @@ void init(LineFollow* env) {
 }
 
 void allocate(LineFollow* env) {
-    line_follow_set_defaults(env);
+    set_defaults(env);
     init(env);
     env->observations = (float*)calloc(LINE_FOLLOW_OBS_SIZE, sizeof(float));
     env->actions = (float*)calloc(LINE_FOLLOW_NUM_ATNS, sizeof(float));
@@ -229,7 +239,7 @@ void add_log(LineFollow* env) {
     float episode_length = (float)env->tick;
     float mean_error = episode_length > 0.0f ? env->centerline_error_sum / episode_length : 0.0f;
     float perf = env->track.length_m > 1e-6f
-        ? line_follow_clampf(env->episode_progress / env->track.length_m, 0.0f, 1.0f)
+        ? clampf(env->episode_progress / env->track.length_m, 0.0f, 1.0f)
         : 0.0f;
 
     env->log.perf += perf;
@@ -240,19 +250,19 @@ void add_log(LineFollow* env) {
     env->log.n += 1.0f;
 }
 
-float line_follow_qti_normalize(float raw, float white_time, float black_time) {
+float qti_normalize(float raw, float white_time, float black_time) {
     float denom = black_time - white_time;
     if (fabsf(denom) < 1e-6f) {
         return raw >= black_time ? 1.0f : 0.0f;
     }
-    return line_follow_clampf((raw - white_time) / denom, 0.0f, 1.0f);
+    return clampf((raw - white_time) / denom, 0.0f, 1.0f);
 }
 
-LineFollowWheelCommand line_follow_map_actions(float* actions, float max_wheel_speed_mps,
+LineFollowWheelCommand map_actions(float* actions, float max_wheel_speed_mps,
         float command_deadband, float left_speed_scale, float right_speed_scale) {
     LineFollowWheelCommand cmd;
-    actions[0] = line_follow_clampf(actions[0], -1.0f, 1.0f);
-    actions[1] = line_follow_clampf(actions[1], -1.0f, 1.0f);
+    actions[0] = clampf(actions[0], -1.0f, 1.0f);
+    actions[1] = clampf(actions[1], -1.0f, 1.0f);
 
     cmd.left_action = fabsf(actions[0]) < command_deadband ? 0.0f : actions[0];
     cmd.right_action = fabsf(actions[1]) < command_deadband ? 0.0f : actions[1];
@@ -261,7 +271,7 @@ LineFollowWheelCommand line_follow_map_actions(float* actions, float max_wheel_s
     return cmd;
 }
 
-static inline void line_follow_sensor_layout(LineFollow* env) {
+static inline void sensor_layout(LineFollow* env) {
     const float lateral[LINE_FOLLOW_OBS_SIZE] = {
         env->sensor_outer_lateral_m,
         env->sensor_inner_lateral_m,
@@ -271,15 +281,15 @@ static inline void line_follow_sensor_layout(LineFollow* env) {
 
     for (int i = 0; i < LINE_FOLLOW_OBS_SIZE; i++) {
         env->sensor_forward[i] = env->sensor_forward_m
-            + env->sensor_forward_jitter_m * line_follow_rand_signed(&env->rng);
+            + env->sensor_forward_jitter_m * rand_signed(&env->rng);
         env->sensor_lateral[i] = lateral[i]
-            + env->sensor_lateral_jitter_m * line_follow_rand_signed(&env->rng);
+            + env->sensor_lateral_jitter_m * rand_signed(&env->rng);
         env->sensor_gain[i] = 1.0f;
         env->sensor_bias[i] = 0.0f;
     }
 }
 
-void line_follow_reset_runtime_pose(LineFollow* env, float x, float y, float theta) {
+void reset_runtime_pose(LineFollow* env, float x, float y, float theta) {
     env->robot_x = x;
     env->robot_y = y;
     env->robot_theta = theta;
@@ -292,7 +302,7 @@ void line_follow_reset_runtime_pose(LineFollow* env, float x, float y, float the
     env->trajectory_count = 0;
 }
 
-static inline void line_follow_record_trajectory(LineFollow* env) {
+static inline void record_trajectory(LineFollow* env) {
     if (env->trajectory_count < LINE_FOLLOW_TRAJECTORY_CAP) {
         int idx = env->trajectory_count++;
         env->trajectory_x[idx] = env->robot_x;
@@ -308,7 +318,7 @@ static inline void line_follow_record_trajectory(LineFollow* env) {
     env->trajectory_y[LINE_FOLLOW_TRAJECTORY_CAP - 1] = env->robot_y;
 }
 
-float line_follow_compute_reward(LineFollow* env, float progress_delta, float centerline_error,
+float compute_reward(LineFollow* env, float progress_delta, float centerline_error,
         float heading_error, bool line_seen, float forward_speed, float action_delta) {
     float reward = progress_delta * env->progress_reward_scale;
     reward -= fabsf(centerline_error) * env->centerline_penalty_scale;
@@ -335,29 +345,29 @@ void compute_observations(LineFollow* env) {
         env->sensor_x[i] = sx;
         env->sensor_y[i] = sy;
 
-        LineFollowNearest nearest = line_follow_track_nearest(&env->track, sx, sy);
-        float coverage = line_follow_track_coverage(
+        LineFollowNearest nearest = nearest_track(&env->track, sx, sy);
+        float coverage = line_coverage(
             nearest.signed_lateral_m, nearest.line_width_m, env->line_edge_softness_m);
         float raw = env->qti_white_time + coverage * (env->qti_black_time - env->qti_white_time);
         raw = raw * env->sensor_gain[i] + env->sensor_bias[i];
         if (env->sensor_noise_std > 0.0f) {
-            raw += env->sensor_noise_std * line_follow_rand_signed(&env->rng);
+            raw += env->sensor_noise_std * rand_signed(&env->rng);
         }
-        raw = line_follow_clampf(raw, 0.0f, env->qti_timeout);
+        raw = clampf(raw, 0.0f, env->qti_timeout);
         env->sensor_raw[i] = raw;
-        env->observations[i] = line_follow_qti_normalize(raw, env->qti_white_time, env->qti_black_time);
+        env->observations[i] = qti_normalize(raw, env->qti_white_time, env->qti_black_time);
         env->sensor_bits[i] = env->observations[i] >= env->qti_threshold ? 1 : 0;
     }
 }
 
-static inline bool line_follow_generate_episode_track(LineFollow* env) {
+static inline bool generate_episode_track(LineFollow* env) {
     for (int i = 0; i < env->max_track_gen_attempts; i++) {
-        if (line_follow_track_generate(&env->track, &env->rng, env->track_family,
+        if (generate_track(&env->track, &env->rng, env->track_family,
                 env->line_width_m, env->track_bounds_m)) {
             return true;
         }
     }
-    return line_follow_track_generate_straight(&env->track, env->track_bounds_m * 1.2f,
+    return generate_straight(&env->track, env->track_bounds_m * 1.2f,
         env->line_width_m, env->track_bounds_m);
 }
 
@@ -378,35 +388,35 @@ void c_reset(LineFollow* env) {
     env->prev_action[1] = 0.0f;
     env->trajectory_count = 0;
 
-    line_follow_sensor_layout(env);
-    line_follow_generate_episode_track(env);
+    sensor_layout(env);
+    generate_episode_track(env);
 
     const LineFollowTrackSample* start = &env->track.samples[0];
-    float lateral_offset = env->start_lateral_offset_m * line_follow_rand_signed(&env->rng);
-    float heading_offset = env->start_heading_offset_rad * line_follow_rand_signed(&env->rng);
+    float lateral_offset = env->start_lateral_offset_m * rand_signed(&env->rng);
+    float heading_offset = env->start_heading_offset_rad * rand_signed(&env->rng);
     float start_heading = atan2f(start->tangent_y, start->tangent_x);
-    line_follow_reset_runtime_pose(env,
+    reset_runtime_pose(env,
         start->x + lateral_offset * start->normal_x,
         start->y + lateral_offset * start->normal_y,
         start_heading + heading_offset);
 
-    LineFollowNearest nearest = line_follow_track_nearest(&env->track, env->robot_x, env->robot_y);
+    LineFollowNearest nearest = nearest_track(&env->track, env->robot_x, env->robot_y);
     env->last_progress = nearest.progress_s;
     env->episode_progress = nearest.progress_s;
     env->centerline_error = nearest.signed_lateral_m;
-    env->heading_error = line_follow_angle_diff(env->robot_theta, nearest.heading_rad);
+    env->heading_error = angle_diff(env->robot_theta, nearest.heading_rad);
     compute_observations(env);
-    line_follow_record_trajectory(env);
+    record_trajectory(env);
 }
 
 void c_step(LineFollow* env) {
-    LineFollowWheelCommand cmd = line_follow_map_actions(env->actions,
+    LineFollowWheelCommand cmd = map_actions(env->actions,
         env->max_wheel_speed_mps, env->command_deadband,
         env->left_speed_scale, env->right_speed_scale);
     env->v_left_cmd = cmd.left_mps;
     env->v_right_cmd = cmd.right_mps;
 
-    float alpha = line_follow_clampf(env->motor_lag_alpha, 0.0f, 1.0f);
+    float alpha = clampf(env->motor_lag_alpha, 0.0f, 1.0f);
     env->v_left += alpha * (env->v_left_cmd - env->v_left);
     env->v_right += alpha * (env->v_right_cmd - env->v_right);
 
@@ -415,25 +425,25 @@ void c_step(LineFollow* env) {
     env->robot_x += forward_speed * cosf(env->robot_theta) * env->dt;
     env->robot_y += forward_speed * sinf(env->robot_theta) * env->dt;
     env->robot_theta += omega * env->dt;
-    env->robot_theta = line_follow_angle_diff(env->robot_theta, 0.0f);
+    env->robot_theta = angle_diff(env->robot_theta, 0.0f);
 
     env->tick += 1;
     compute_observations(env);
-    line_follow_record_trajectory(env);
+    record_trajectory(env);
 
-    LineFollowNearest nearest = line_follow_track_nearest(&env->track, env->robot_x, env->robot_y);
+    LineFollowNearest nearest = nearest_track(&env->track, env->robot_x, env->robot_y);
     float progress_delta = nearest.progress_s - env->last_progress;
     if (progress_delta < -0.25f * env->track.length_m) {
         progress_delta = 0.0f;
     }
-    progress_delta = line_follow_clampf(progress_delta, -0.05f, 0.08f);
+    progress_delta = clampf(progress_delta, -0.05f, 0.08f);
 
     env->last_progress = nearest.progress_s;
     if (nearest.progress_s > env->episode_progress) {
         env->episode_progress = nearest.progress_s;
     }
     env->centerline_error = nearest.signed_lateral_m;
-    env->heading_error = line_follow_angle_diff(env->robot_theta, nearest.heading_rad);
+    env->heading_error = angle_diff(env->robot_theta, nearest.heading_rad);
     env->centerline_error_sum += fabsf(env->centerline_error);
 
     bool line_seen = false;
@@ -449,7 +459,7 @@ void c_step(LineFollow* env) {
     env->prev_action[0] = cmd.left_action;
     env->prev_action[1] = cmd.right_action;
 
-    float reward = line_follow_compute_reward(env, progress_delta, env->centerline_error,
+    float reward = compute_reward(env, progress_delta, env->centerline_error,
         env->heading_error, line_seen, forward_speed, action_delta);
     env->rewards[0] = reward;
     env->last_reward = reward;
@@ -477,13 +487,38 @@ void c_step(LineFollow* env) {
 }
 
 #ifndef LINE_FOLLOW_NO_RENDER
-static inline Vector2 line_follow_world_to_screen(LineFollow* env, float x, float y,
+static inline Vector2 world_to_screen(LineFollow* env, float x, float y,
         int width, int height, float scale) {
     (void)env;
     return (Vector2){
         width * 0.5f + x * scale,
         height * 0.58f - y * scale,
     };
+}
+
+static inline Vector2 body_to_screen(LineFollow* env, float forward_m, float lateral_m,
+        int width, int height, float scale) {
+    float cos_theta = cosf(env->robot_theta);
+    float sin_theta = sinf(env->robot_theta);
+    float x = env->robot_x + forward_m * cos_theta - lateral_m * sin_theta;
+    float y = env->robot_y + forward_m * sin_theta + lateral_m * cos_theta;
+    return world_to_screen(env, x, y, width, height, scale);
+}
+
+static inline void draw_body_rect(LineFollow* env, float forward_m, float lateral_m,
+        float length_m, float width_m, int screen_width, int screen_height, float scale, Color color) {
+    Vector2 center = body_to_screen(env, forward_m, lateral_m,
+        screen_width, screen_height, scale);
+    float length_px = fmaxf(1.0f, length_m * scale);
+    float width_px = fmaxf(1.0f, width_m * scale);
+    Rectangle rect = {
+        center.x,
+        center.y,
+        length_px,
+        width_px,
+    };
+    DrawRectanglePro(rect, (Vector2){length_px * 0.5f, width_px * 0.5f},
+        -env->robot_theta * 180.0f / LINE_FOLLOW_PI, color);
 }
 
 void c_render(LineFollow* env) {
@@ -506,41 +541,45 @@ void c_render(LineFollow* env) {
     ClearBackground((Color){248, 248, 244, 255});
 
     for (int i = 0; i < env->track.sample_count - 1; i++) {
-        Vector2 a = line_follow_world_to_screen(env,
+        Vector2 a = world_to_screen(env,
             env->track.samples[i].x, env->track.samples[i].y, width, height, scale);
-        Vector2 b = line_follow_world_to_screen(env,
+        Vector2 b = world_to_screen(env,
             env->track.samples[i + 1].x, env->track.samples[i + 1].y, width, height, scale);
         DrawLineEx(a, b, fmaxf(2.0f, env->track.samples[i].line_width_m * scale), BLACK);
     }
 
     for (int i = 1; i < env->trajectory_count; i++) {
-        Vector2 a = line_follow_world_to_screen(env,
+        Vector2 a = world_to_screen(env,
             env->trajectory_x[i - 1], env->trajectory_y[i - 1], width, height, scale);
-        Vector2 b = line_follow_world_to_screen(env,
+        Vector2 b = world_to_screen(env,
             env->trajectory_x[i], env->trajectory_y[i], width, height, scale);
         DrawLineEx(a, b, 2.0f, (Color){40, 140, 200, 120});
     }
 
-    Vector2 center = line_follow_world_to_screen(env, env->robot_x, env->robot_y, width, height, scale);
-    float body_len = 0.095f * scale;
-    float body_w = 0.075f * scale;
-    Rectangle body = {
-        center.x - body_len * 0.5f,
-        center.y - body_w * 0.5f,
-        body_len,
-        body_w,
-    };
-    DrawRectanglePro(body, (Vector2){body_len * 0.5f, body_w * 0.5f},
-        -env->robot_theta * 180.0f / LINE_FOLLOW_PI, (Color){42, 78, 96, 255});
+    Vector2 center = world_to_screen(env, env->robot_x, env->robot_y, width, height, scale);
+    float tire_lateral = env->wheel_base_m * 0.5f;
+    draw_body_rect(env, 0.0f, tire_lateral, env->tire_diameter_m,
+        env->tire_width_m, width, height, scale, (Color){18, 18, 18, 255});
+    draw_body_rect(env, 0.0f, -tire_lateral, env->tire_diameter_m,
+        env->tire_width_m, width, height, scale, (Color){18, 18, 18, 255});
 
-    Vector2 nose = line_follow_world_to_screen(env,
-        env->robot_x + 0.07f * cosf(env->robot_theta),
-        env->robot_y + 0.07f * sinf(env->robot_theta),
-        width, height, scale);
+    float body_len_m = env->body_ahead_m + env->body_behind_m;
+    float body_center_forward_m = 0.5f * (env->body_ahead_m - env->body_behind_m);
+    draw_body_rect(env, body_center_forward_m, 0.0f, body_len_m,
+        env->body_width_m, width, height, scale, (Color){42, 78, 96, 255});
+
+    Vector2 axle_left = body_to_screen(env, 0.0f, tire_lateral, width, height, scale);
+    Vector2 axle_right = body_to_screen(env, 0.0f, -tire_lateral, width, height, scale);
+    DrawLineEx(axle_left, axle_right, 2.0f, (Color){210, 218, 220, 180});
+    DrawCircleV(center, 3.5f, (Color){245, 245, 240, 255});
+
+    Vector2 nose = world_to_screen(env,
+        env->robot_x + env->body_ahead_m * cosf(env->robot_theta),
+        env->robot_y + env->body_ahead_m * sinf(env->robot_theta), width, height, scale);
     DrawLineEx(center, nose, 3.0f, (Color){230, 90, 55, 255});
 
     for (int i = 0; i < LINE_FOLLOW_OBS_SIZE; i++) {
-        Vector2 p = line_follow_world_to_screen(env, env->sensor_x[i], env->sensor_y[i],
+        Vector2 p = world_to_screen(env, env->sensor_x[i], env->sensor_y[i],
             width, height, scale);
         unsigned char shade = (unsigned char)(255.0f * (1.0f - env->observations[i]));
         Color color = (Color){shade, shade, shade, 255};
