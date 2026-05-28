@@ -160,6 +160,7 @@ def print_dashboard(args, model_size, flat_logs, clear=False, idx=[0],
     print('\033[0;0H' + capture.get())
 
 def validate_config(args):
+    sync_policy_to_env(args)
     minibatch_size = args['train']['minibatch_size']
     horizon = args['train']['horizon']
     total_agents = args['vec']['total_agents']
@@ -168,7 +169,19 @@ def validate_config(args):
     assert minibatch_size <= horizon * total_agents, \
         f'minibatch_size {minibatch_size} > total_agents {total_agents} * horizon {horizon}'
 
+def sync_policy_to_env(args):
+    env = args.get('env') if isinstance(args, dict) else None
+    policy = args.get('policy') if isinstance(args, dict) else None
+    if not isinstance(env, dict) or not isinstance(policy, dict):
+        return
+
+    if 'policy_hidden_size' in env and 'hidden_size' in policy:
+        env['policy_hidden_size'] = int(policy['hidden_size'])
+    if 'policy_num_layers' in env and 'num_layers' in policy:
+        env['policy_num_layers'] = int(policy['num_layers'])
+
 def _resolve_backend(args):
+    sync_policy_to_env(args)
     compiled_env = getattr(_C, 'env_name', None)
     assert compiled_env is None or compiled_env == args['env_name'], \
         f'build.sh was run for {compiled_env}, not {args["env_name"]}'
@@ -656,6 +669,7 @@ def load_config(env_name):
     args['env_name'] = env_name
     for section in p.sections():
         args.setdefault(section, {})
+    sync_policy_to_env(args)
     return dict(args)
 
 def main():

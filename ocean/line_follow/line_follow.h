@@ -59,8 +59,14 @@ struct LineFollow {
     int lost_line_limit;
     int track_family;
     int max_track_gen_attempts;
+    int policy_hidden_size;
+    int policy_num_layers;
+    int model_dt_enabled;
 
     float dt;
+    float dt_min;
+    float dt_max;
+    float episode_dt;
     float max_wheel_speed_mps;
     float wheel_base_m;
     float body_ahead_m;
@@ -107,6 +113,8 @@ struct LineFollow {
     float sensor_noise_std;
     float sensor_gain[LINE_FOLLOW_OBS_SIZE];
     float sensor_bias[LINE_FOLLOW_OBS_SIZE];
+    float sensor_white_time[LINE_FOLLOW_OBS_SIZE];
+    float sensor_black_time[LINE_FOLLOW_OBS_SIZE];
     float sensor_forward[LINE_FOLLOW_OBS_SIZE];
     float sensor_lateral[LINE_FOLLOW_OBS_SIZE];
     float sensor_x[LINE_FOLLOW_OBS_SIZE];
@@ -117,9 +125,15 @@ struct LineFollow {
 
     float qti_white_time;
     float qti_black_time;
+    float qti_white_jitter;
+    float qti_black_jitter;
     float qti_timeout;
     float line_width_m;
+    float line_width_jitter_m;
     float line_edge_softness_m;
+    float line_edge_softness_jitter_m;
+    float episode_line_width_m;
+    float episode_line_edge_softness_m;
     float track_bounds_m;
     float start_lateral_offset_m;
     float start_heading_offset_rad;
@@ -142,13 +156,19 @@ static inline float rand_signed(unsigned int* rng) {
 
 void set_defaults(LineFollow* env) {
     env->num_agents = 1;
-    env->max_steps = 600;
-    env->lost_line_limit = 30;
+    env->max_steps = 800;
+    env->lost_line_limit = 16;
     env->track_family = LINE_FOLLOW_TRACK_RANDOM;
     env->max_track_gen_attempts = 4;
+    env->policy_hidden_size = 8;
+    env->policy_num_layers = 0;
+    env->model_dt_enabled = 1;
 
-    env->dt = 0.05f;
-    env->max_wheel_speed_mps = 0.35f;
+    env->dt = 0.065f;
+    env->dt_min = 0.045f;
+    env->dt_max = 0.090f;
+    env->episode_dt = env->dt;
+    env->max_wheel_speed_mps = 0.010f;
     env->wheel_base_m = 0.125f;
     env->body_ahead_m = 0.040f;
     env->body_behind_m = 0.090f;
@@ -160,7 +180,7 @@ void set_defaults(LineFollow* env) {
     env->left_speed_scale = 1.0f;
     env->right_speed_scale = 1.0f;
 
-    env->progress_reward_scale = 8.0f;
+    env->progress_reward_scale = 64.0f;
     env->centerline_penalty_scale = 4.0f;
     env->heading_penalty_scale = 0.05f;
     env->lost_line_penalty = 0.04f;
@@ -169,20 +189,26 @@ void set_defaults(LineFollow* env) {
     env->too_far_m = 0.09f;
     env->track_complete_margin_m = 0.06f;
 
-    env->sensor_forward_m = 0.035f;
+    env->sensor_forward_m = 0.045f;
     env->sensor_inner_lateral_m = 0.020f;
     env->sensor_outer_lateral_m = 0.040f;
-    env->sensor_lateral_jitter_m = 0.0f;
-    env->sensor_forward_jitter_m = 0.0f;
+    env->sensor_lateral_jitter_m = 0.005f;
+    env->sensor_forward_jitter_m = 0.005f;
     env->sensor_noise_std = 0.0f;
     env->qti_threshold = 0.5f;
-    env->qti_white_time = 100.0f;
-    env->qti_black_time = 1100.0f;
-    env->qti_timeout = 2000.0f;
+    env->qti_white_time = 40.0f;
+    env->qti_black_time = 350.0f;
+    env->qti_white_jitter = 25.0f;
+    env->qti_black_jitter = 120.0f;
+    env->qti_timeout = 2500.0f;
     env->line_width_m = 0.018f;
+    env->line_width_jitter_m = 0.004f;
     env->line_edge_softness_m = 0.006f;
+    env->line_edge_softness_jitter_m = 0.004f;
+    env->episode_line_width_m = env->line_width_m;
+    env->episode_line_edge_softness_m = env->line_edge_softness_m;
     env->track_bounds_m = 1.0f;
-    env->start_lateral_offset_m = 0.015f;
+    env->start_lateral_offset_m = 0.050f;
     env->start_heading_offset_rad = 0.12f;
 
     const float lateral[LINE_FOLLOW_OBS_SIZE] = {
@@ -194,6 +220,8 @@ void set_defaults(LineFollow* env) {
     for (int i = 0; i < LINE_FOLLOW_OBS_SIZE; i++) {
         env->sensor_gain[i] = 1.0f;
         env->sensor_bias[i] = 0.0f;
+        env->sensor_white_time[i] = env->qti_white_time;
+        env->sensor_black_time[i] = env->qti_black_time;
         env->sensor_forward[i] = env->sensor_forward_m;
         env->sensor_lateral[i] = lateral[i];
     }
@@ -210,6 +238,7 @@ void init(LineFollow* env) {
     env->centerline_error_sum = 0.0f;
     env->heading_error = 0.0f;
     env->last_reward = 0.0f;
+    env->episode_dt = env->dt;
     env->v_left = 0.0f;
     env->v_right = 0.0f;
     env->v_left_cmd = 0.0f;
@@ -258,6 +287,76 @@ float qti_normalize(float raw, float white_time, float black_time) {
     return clampf((raw - white_time) / denom, 0.0f, 1.0f);
 }
 
+static inline float jittered_positive(float base, float jitter, float floor, unsigned int* rng) {
+    return fmaxf(floor, base + jitter * rand_signed(rng));
+}
+
+static inline float sample_episode_dt(LineFollow* env) {
+    float nominal = env->dt > 0.0f ? env->dt : 0.025f;
+    float lo = env->dt_min > 0.0f ? env->dt_min : nominal;
+    float hi = env->dt_max > 0.0f ? env->dt_max : nominal;
+    if (lo > hi) {
+        float tmp = lo;
+        lo = hi;
+        hi = tmp;
+    }
+    lo = fmaxf(lo, 0.001f);
+    hi = fmaxf(hi, lo);
+    float unit = (float)rand_r(&env->rng) / (float)RAND_MAX;
+    return lo + unit * (hi - lo);
+}
+
+static inline float estimate_policy_dt(int hidden_size, int num_layers) {
+    int h = hidden_size > 0 ? hidden_size : 1;
+    int layers = num_layers > 0 ? num_layers : 0;
+
+    if (layers == 0) {
+        if (h <= 2) return 0.045f;
+        if (h <= 4) return 0.055f;
+        if (h <= 8) return 0.065f;
+        return 0.065f + 0.004f * (float)(h - 8);
+    }
+
+    if (h <= 2) return 0.070f;
+    if (h <= 4) return 0.105f;
+    if (h <= 8) return 0.188f;
+    if (h <= 16) {
+        return 0.188f + (0.477f - 0.188f) * (float)(h - 8) / 8.0f;
+    }
+    return 0.477f + 0.040f * (float)(h - 16);
+}
+
+static inline int scale_step_limit_for_dt(int steps, float reference_dt, float dt) {
+    if (steps <= 1 || reference_dt <= 0.0f || dt <= 0.0f) {
+        return steps;
+    }
+    int scaled = (int)ceilf((float)steps * reference_dt / dt);
+    return scaled < 1 ? 1 : scaled;
+}
+
+void apply_model_timing(LineFollow* env) {
+    if (!env->model_dt_enabled) {
+        return;
+    }
+
+    float reference_dt = env->dt > 0.0f ? env->dt : 0.065f;
+    float min_ratio = env->dt_min > 0.0f ? env->dt_min / reference_dt : 1.0f;
+    float max_ratio = env->dt_max > 0.0f ? env->dt_max / reference_dt : 1.0f;
+    if (min_ratio > max_ratio) {
+        float tmp = min_ratio;
+        min_ratio = max_ratio;
+        max_ratio = tmp;
+    }
+
+    float dt = estimate_policy_dt(env->policy_hidden_size, env->policy_num_layers);
+    env->max_steps = scale_step_limit_for_dt(env->max_steps, reference_dt, dt);
+    env->lost_line_limit = scale_step_limit_for_dt(env->lost_line_limit, reference_dt, dt);
+    env->dt = dt;
+    env->dt_min = fmaxf(0.001f, dt * min_ratio);
+    env->dt_max = fmaxf(env->dt_min, dt * max_ratio);
+    env->episode_dt = env->dt;
+}
+
 LineFollowWheelCommand map_actions(float* actions, float max_wheel_speed_mps,
         float command_deadband, float left_speed_scale, float right_speed_scale) {
     LineFollowWheelCommand cmd;
@@ -269,6 +368,16 @@ LineFollowWheelCommand map_actions(float* actions, float max_wheel_speed_mps,
     cmd.left_mps = cmd.left_action * max_wheel_speed_mps * left_speed_scale;
     cmd.right_mps = cmd.right_action * max_wheel_speed_mps * right_speed_scale;
     return cmd;
+}
+
+static inline void randomize_episode_params(LineFollow* env) {
+    env->episode_dt = sample_episode_dt(env);
+    env->episode_line_width_m = jittered_positive(
+        env->line_width_m, env->line_width_jitter_m, 0.004f, &env->rng);
+    env->episode_line_edge_softness_m = jittered_positive(
+        env->line_edge_softness_m, env->line_edge_softness_jitter_m, 0.001f, &env->rng);
+    env->episode_line_edge_softness_m = fminf(
+        env->episode_line_edge_softness_m, 0.75f * env->episode_line_width_m);
 }
 
 static inline void sensor_layout(LineFollow* env) {
@@ -286,7 +395,29 @@ static inline void sensor_layout(LineFollow* env) {
             + env->sensor_lateral_jitter_m * rand_signed(&env->rng);
         env->sensor_gain[i] = 1.0f;
         env->sensor_bias[i] = 0.0f;
+        env->sensor_white_time[i] = jittered_positive(
+            env->qti_white_time, env->qti_white_jitter, 0.0f, &env->rng);
+        env->sensor_black_time[i] = jittered_positive(
+            env->qti_black_time, env->qti_black_jitter,
+            env->sensor_white_time[i] + 1.0f, &env->rng);
+        env->sensor_black_time[i] = fminf(env->sensor_black_time[i], env->qti_timeout);
+        env->sensor_black_time[i] = fmaxf(env->sensor_black_time[i],
+            env->sensor_white_time[i] + 1.0f);
     }
+}
+
+static inline float sample_start_lateral_offset(LineFollow* env) {
+    const int targets = LINE_FOLLOW_OBS_SIZE + 1;
+    int idx = (int)(rand_r(&env->rng) % targets);
+    float lateral_offset = 0.0f;
+    if (idx < LINE_FOLLOW_OBS_SIZE) {
+        lateral_offset = -env->sensor_lateral[idx];
+    }
+
+    float jitter = 0.25f * env->episode_line_width_m * rand_signed(&env->rng);
+    float limit = fmaxf(env->start_lateral_offset_m,
+        env->sensor_outer_lateral_m + env->sensor_lateral_jitter_m);
+    return clampf(lateral_offset + jitter, -limit, limit);
 }
 
 void reset_runtime_pose(LineFollow* env, float x, float y, float theta) {
@@ -347,8 +478,9 @@ void compute_observations(LineFollow* env) {
 
         LineFollowNearest nearest = nearest_track(&env->track, sx, sy);
         float coverage = line_coverage(
-            nearest.signed_lateral_m, nearest.line_width_m, env->line_edge_softness_m);
-        float raw = env->qti_white_time + coverage * (env->qti_black_time - env->qti_white_time);
+            nearest.signed_lateral_m, nearest.line_width_m, env->episode_line_edge_softness_m);
+        float raw = env->sensor_white_time[i]
+            + coverage * (env->sensor_black_time[i] - env->sensor_white_time[i]);
         raw = raw * env->sensor_gain[i] + env->sensor_bias[i];
         if (env->sensor_noise_std > 0.0f) {
             raw += env->sensor_noise_std * rand_signed(&env->rng);
@@ -363,12 +495,12 @@ void compute_observations(LineFollow* env) {
 static inline bool generate_episode_track(LineFollow* env) {
     for (int i = 0; i < env->max_track_gen_attempts; i++) {
         if (generate_track(&env->track, &env->rng, env->track_family,
-                env->line_width_m, env->track_bounds_m)) {
+                env->episode_line_width_m, env->track_bounds_m)) {
             return true;
         }
     }
     return generate_straight(&env->track, env->track_bounds_m * 1.2f,
-        env->line_width_m, env->track_bounds_m);
+        env->episode_line_width_m, env->track_bounds_m);
 }
 
 void c_reset(LineFollow* env) {
@@ -388,11 +520,12 @@ void c_reset(LineFollow* env) {
     env->prev_action[1] = 0.0f;
     env->trajectory_count = 0;
 
+    randomize_episode_params(env);
     sensor_layout(env);
     generate_episode_track(env);
 
     const LineFollowTrackSample* start = &env->track.samples[0];
-    float lateral_offset = env->start_lateral_offset_m * rand_signed(&env->rng);
+    float lateral_offset = sample_start_lateral_offset(env);
     float heading_offset = env->start_heading_offset_rad * rand_signed(&env->rng);
     float start_heading = atan2f(start->tangent_y, start->tangent_x);
     reset_runtime_pose(env,
@@ -416,15 +549,29 @@ void c_step(LineFollow* env) {
     env->v_left_cmd = cmd.left_mps;
     env->v_right_cmd = cmd.right_mps;
 
+    if (env->v_left_cmd < 0.0f || env->v_right_cmd < 0.0f) {
+        env->tick += 1;
+        env->prev_action[0] = cmd.left_action;
+        env->prev_action[1] = cmd.right_action;
+        env->rewards[0] = -1.0f;
+        env->last_reward = -1.0f;
+        env->episode_return -= 1.0f;
+        env->terminals[0] = 1.0f;
+        add_log(env);
+        c_reset(env);
+        return;
+    }
+
     float alpha = clampf(env->motor_lag_alpha, 0.0f, 1.0f);
     env->v_left += alpha * (env->v_left_cmd - env->v_left);
     env->v_right += alpha * (env->v_right_cmd - env->v_right);
 
     float forward_speed = 0.5f * (env->v_left + env->v_right);
     float omega = (env->v_right - env->v_left) / fmaxf(env->wheel_base_m, 1e-4f);
-    env->robot_x += forward_speed * cosf(env->robot_theta) * env->dt;
-    env->robot_y += forward_speed * sinf(env->robot_theta) * env->dt;
-    env->robot_theta += omega * env->dt;
+    float dt = env->episode_dt > 0.0f ? env->episode_dt : env->dt;
+    env->robot_x += forward_speed * cosf(env->robot_theta) * dt;
+    env->robot_y += forward_speed * sinf(env->robot_theta) * dt;
+    env->robot_theta += omega * dt;
     env->robot_theta = angle_diff(env->robot_theta, 0.0f);
 
     env->tick += 1;
@@ -587,8 +734,9 @@ void c_render(LineFollow* env) {
         DrawCircleLines((int)p.x, (int)p.y, 7.0f, env->sensor_bits[i] ? RED : GRAY);
     }
 
-    DrawText(TextFormat("step %d  reward %.3f  return %.2f", env->tick,
-        env->last_reward, env->episode_return), 16, 16, 20, (Color){20, 20, 20, 255});
+    DrawText(TextFormat("step %d  dt %.0fms  reward %.3f  return %.2f", env->tick,
+        1000.0f * env->episode_dt, env->last_reward, env->episode_return),
+        16, 16, 20, (Color){20, 20, 20, 255});
     DrawText(TextFormat("progress %.2fm / %.2fm  error %.3fm  heading %.2frad",
         env->episode_progress, env->track.length_m, env->centerline_error, env->heading_error),
         16, 42, 20, (Color){20, 20, 20, 255});

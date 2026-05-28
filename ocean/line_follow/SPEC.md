@@ -169,7 +169,7 @@ tire diameter:                     65 mm = 0.065 m
 body behind axle:                  90 mm = 0.090 m
 body ahead of axle:                40 mm = 0.040 m
 total body length around axle:    130 mm = 0.130 m
-QTI sensor forward offset:         35 mm = 0.035 m ahead of axle
+QTI sensor forward offset:         45 mm = 0.045 m ahead of axle
 inner QTI lateral offsets:        +/-20 mm = +/-0.020 m from robot centerline
 outer QTI lateral offsets:        +/-40 mm = +/-0.040 m from robot centerline
 outer-left to outer-right spread:  80 mm = 0.080 m
@@ -178,10 +178,10 @@ outer-left to outer-right spread:  80 mm = 0.080 m
 Nominal QTI body-frame positions:
 
 ```text
-outer_left   = (forward_m = 0.035, lateral_m =  0.040)
-inner_left   = (forward_m = 0.035, lateral_m =  0.020)
-inner_right  = (forward_m = 0.035, lateral_m = -0.020)
-outer_right  = (forward_m = 0.035, lateral_m = -0.040)
+outer_left   = (forward_m = 0.045, lateral_m =  0.040)
+inner_left   = (forward_m = 0.045, lateral_m =  0.020)
+inner_right  = (forward_m = 0.045, lateral_m = -0.020)
+outer_right  = (forward_m = 0.045, lateral_m = -0.040)
 ```
 
 The sim and renderer should treat these as the nominal geometry before applying
@@ -189,6 +189,10 @@ episode randomization. If the "tire-to-tire width" later proves to be measured
 between outer tire faces rather than wheel contact centerlines, update
 `wheel_base_m` separately; the differential-drive model needs center-to-center
 wheel contact spacing.
+
+Current retrain defaults randomize both forward and lateral QTI positions by
+`0.005 m` to reflect the measured build imprecision. Sensor failure
+randomization is intentionally left out of the next retrain.
 
 The current top-down renderer still uses visual placeholders for unmeasured
 widths: `body_width_m = 0.075` and `tire_width_m = 0.012`. These affect only
@@ -428,15 +432,52 @@ filtered_speed += alpha * (commanded_speed - filtered_speed)
 The lag parameter should be randomized so policies do not depend on exact motor
 response.
 
-Suggested sim control rate:
+Current assumed sim control rate for the smaller model:
 
 ```text
-dt = 0.05 seconds
-20 Hz policy/action rate
+dt = 0.065 seconds
+dt_min = 0.045 seconds
+dt_max = 0.090 seconds
 ```
 
-That is slow enough to match a microcontroller control loop and fast enough for
-line-following dynamics.
+This is not a pause inserted into PufferLib. It is the distance-integration time
+between policy decisions: how far the robot moves before the next observation
+and action. Live host-timestamp telemetry of the exported Propeller model, built
+with `LINE_FOLLOW_LOOP_MS=25` and `LINE_FOLLOW_PRINT_EVERY=50`, measured an
+effective closed-loop update period of about 476.6 ms. That includes QTI reads,
+model inference, any drive command, amortized serial output, and the requested
+Propeller pause.
+
+During training, the env samples an episode-level `episode_dt` from
+`[dt_min, dt_max]` and uses that value for kinematic integration. The previous
+hidden-size-16 recurrent exported model measured about 476.6 ms/update; the
+hidden-size-8 recurrent model measured about 187.5 ms/update with the same
+requested 25 ms Propeller pause. The hidden-size-8 feed-forward model measured
+about 52.3 ms/update in telemetry-only mode and about 64.6 ms/update in the
+drive log, so the default H8/L0 timing target is now 65 ms.
+
+The env applies model-aware timing before init when `model_dt_enabled = 1`.
+PufferLib syncs the selected `[policy] hidden_size` and `num_layers` into
+`[env] policy_hidden_size` and `policy_num_layers`; `line_follow` then estimates
+the real control period from that model shape. Current estimates are:
+
+```text
+H2/L0  ->  45 ms
+H4/L0  ->  55 ms
+H8/L0  ->  65 ms
+H2/L1  ->  70 ms
+H4/L1  -> 105 ms
+H8/L1  -> 188 ms
+H16/L1 -> 477 ms
+```
+
+When derived `dt` changes, `max_steps` and `lost_line_limit` are scaled
+inversely so larger/slower models do not receive extra wall-clock episode time
+or lost-line grace. The current `max_wheel_speed_mps = 0.010` keeps full-speed
+travel near 0.65 mm per default H8/L0 policy decision. `progress_reward_scale =
+64.0` keeps forward progress meaningful at that low speed. `firmware_loop_ms =
+25` is a separate firmware-build constant: it is the requested Propeller pause
+after each loop, not the canonical sim `dt`.
 
 ## QTI Sensor Facts
 
@@ -469,6 +510,16 @@ Official Parallax sources imply these constraints:
 - The QTI Line Follower kit mounts sensors under the ActivityBot chassis; each
   sensor connects to 5 V, one Propeller I/O pin, and ground
   ([QTI build tutorial](https://learn.parallax.com/courses/qti-line-following-activitybot-with-blocklyprop/lessons/build-the-qti-line-follower/)).
+- Do not install the kit's 10 kOhm resistors for the Propeller line-following
+  path. The QTI Line Follower AppKit guide says those resistors can be added
+  across QTI W and R to make an analog voltage output for A/D inputs, and
+  explicitly warns not to use them with Parallax line-following example code.
+  Our robot code uses the Propeller I/O RC-time/digital timing path, not an ADC
+  voltage input.
+- The optional resistor mentioned in Parallax's ActivityBot QTI test lesson is
+  a 220 ohm resistor in the 5 V feed to reduce IR brightness if shiny paper or
+  tape overwhelms the sensors. Do not add it for the first telemetry dump; only
+  try it if the raw readings show saturation.
 
 ## Sensor Model
 
@@ -613,7 +664,7 @@ Per-step reward components:
 - heading_error_penalty from privileged track tangent
 - lost_line_penalty when no sensor sees black
 - action_smoothness_penalty for twitchy wheel commands
-- reverse_penalty for excessive backward motion
+- hard terminal with reward `-1.0` if either wheel command is negative
 ```
 
 Reward should use the true simulated state, not only what the QTI sensors can
@@ -626,6 +677,7 @@ ActivityBot.
 Termination:
 
 ```text
+v_left_cmd < 0 or v_right_cmd < 0
 episode_step >= max_steps
 lost_line_steps >= lost_line_limit
 robot too far from track centerline
@@ -694,6 +746,9 @@ start_heading_offset_rad
 
 Randomization should start wide but not absurd. If training fails completely,
 narrow the ranges until a policy learns, then widen them incrementally.
+Current reset sampling chooses among the current episode's four jittered sensor
+lateral targets plus centered, so some episodes begin with the black line under
+an outer QTI sensor rather than only near the center pair.
 
 ## Rendering
 
@@ -706,7 +761,7 @@ The raylib renderer should show:
 - Tires/wheels as top-down black bars, placed from the measured 125 mm
   tire-to-tire width. The measured 65 mm tire diameter is the fore/aft length
   of each bar in the top-down view.
-- Four sensor positions using the measured 35 mm forward offset and
+- Four sensor positions using the measured 45 mm forward offset and
   +/-20 mm / +/-40 mm lateral offsets.
 - Sensor positions, normalized QTI levels, and thresholded black/white debug
   state.
@@ -844,12 +899,39 @@ The first default 20M-step V1 probe wrote
 `logs/line_follow/1779931009464.json` and reached `env/perf=0.570`,
 `env/score=0.826`, `env/centerline_error=0.011`, and about `2.0M` final SPS.
 
-The first full 200M-step V1 train wrote `logs/line_follow/1779931480083.json`
+An early full 200M-step V1 train wrote `logs/line_follow/1779931480083.json`
 and reached final `env/perf=0.944`, `env/score=1.234`,
 `env/episode_return=3.14`, `env/episode_length=42.04`,
-`env/centerline_error=0.0081`, and `SPS=1,635,391`. The latest checkpoint load
+`env/centerline_error=0.0081`, and `SPS=1,635,391`. That checkpoint load
 was verified on `DISPLAY=:0` from
 `checkpoints/line_follow/1779931480083/0000000199753728.bin`.
+
+The current measured-control 200M-step train wrote
+`logs/line_follow/1779950360328.json` with `dt=0.477`, `dt_min=0.450`,
+`dt_max=0.520`, and `max_wheel_speed_mps=0.020`. It reached
+`env/perf=0.334`, `env/score=0.623`, `env/episode_return=-0.418`,
+`env/episode_length=10.48`, `env/centerline_error=0.0222`, and
+`SPS=1,972,307`. Its checkpoint is
+`checkpoints/line_follow/1779950360328/0000000199753728.bin`. Host smoke showed
+the one-hot `outer_right` synthetic case turning left, so treat this checkpoint
+as speed-scaled but not yet closed-loop drive-approved.
+
+The hard-no-reverse 200M-step train wrote `logs/line_follow/1779952610219.json`
+with `policy.hidden_size=8`, `policy.num_layers=0`, `dt=0.120`,
+`dt_min=0.080`, `dt_max=0.200`, and `max_wheel_speed_mps=0.010`. It reached
+final `env/perf=0.297`, `env/score=0.591`, `env/episode_return=-1.300`,
+`env/episode_length=60.10`, `env/centerline_error=0.0087`, and
+`SPS=2,129,033`. Its checkpoint is
+`checkpoints/line_follow/1779952610219/0000000199753728.bin`. Bounded
+`DISPLAY=:0` eval loaded the checkpoint successfully. Host smoke still shows
+some negative raw actions on synthetic one-hot cases, but the sim now hard
+terminates negative wheel commands with reward `-1.0`, and host/Propeller
+deployment clamps negative wheel commands to zero ticks. Treat this checkpoint
+as reverse-safe, not yet drive-approved.
+
+That run predates model-aware dt coupling and used an overlarge feed-forward
+timing target. Retrain before treating the current `dt=0.065` / architecture
+sweep config as evaluated.
 
 ## Training Plan
 
@@ -906,15 +988,44 @@ mean = 1
 scale = auto
 ```
 
+The current ActivityBot defaults are even smaller:
+
+```ini
+[policy]
+hidden_size = 8
+num_layers = 0
+
+[env]
+dt = 0.065
+dt_min = 0.045
+dt_max = 0.090
+policy_hidden_size = 8
+policy_num_layers = 0
+model_dt_enabled = 1
+
+[sweep.policy.hidden_size]
+min = 2
+max = 8
+mean = 4
+
+[sweep.policy.num_layers]
+min = 0
+max = 1
+mean = 0
+```
+
 Initial deployment-focused sweeps should prefer:
 
-- `hidden_size` in `{8, 16, 32}`.
-- `hidden_size = 64` only as an upper-bound comparison.
+- `hidden_size` in `{2, 4, 8}` while the policy must run on the Propeller.
+- larger hidden sizes only as upper-bound comparisons.
 - the normal PufferLib training stack unless a concrete export/deployment reason
   forces a change.
 - feed-forward policies first because they are simplest to export to Propeller C.
 - recurrent policies only if feed-forward policies fail, and only if the
   recurrent state can be represented and updated in simple C.
+- if `num_layers=1` is swept, the candidate must use its slower estimated `dt`;
+  do not compare recurrent and feed-forward models at the same kinematic update
+  period.
 
 Every sweep candidate should be judged by both sim score and deployability:
 
@@ -922,7 +1033,7 @@ Every sweep candidate should be judged by both sim score and deployability:
 parameter_count
 estimated C array size
 estimated Propeller RAM/EEPROM footprint
-estimated policy_forward latency at 20 Hz
+estimated policy_forward latency at the measured/target control cadence
 ```
 
 A larger policy that trains slightly better in sim but cannot fit or run cleanly
@@ -947,6 +1058,281 @@ weights. The Propeller side should implement only the required forward pass.
 
 Do not plan to run ONNX, Torch, NumPy, or a general model interpreter on the
 Propeller.
+
+## Host Model Smoke Test
+
+Before QTI sensors are attached, smoke-test a trained checkpoint by feeding
+synthetic normalized QTI observations into the native C inference path:
+
+```text
+ocean/line_follow/scripts/line-follow-model-smoke.sh
+```
+
+The script builds `ocean/line_follow/host/line_follow_model_smoke.c`, loads the
+latest `checkpoints/line_follow/**/*.bin` checkpoint by default, and prints:
+
+```text
+obs[4] -> raw continuous action[2] -> clamped m/s -> approximate ticks/second
+```
+
+It uses the deployment geometry/scaling assumptions:
+
+```text
+action [-1, 1] -> +/-0.010 m/s
+65 mm tire diameter
+64 encoder ticks / wheel revolution
+```
+
+To test one hand-written observation:
+
+```text
+ocean/line_follow/scripts/line-follow-model-smoke.sh 0.2 0.7 0.7 0.2
+```
+
+Each row resets the native MinGRU state so synthetic cases are independent. A
+real robot loop must preserve recurrent state across timesteps if using the
+native checkpoint directly.
+
+## Propeller C Model Fake-Observation Test
+
+To prove the trained model itself can run on the ActivityBot before QTI sensors
+are attached, use the Propeller C model fake-observation firmware:
+
+```text
+ocean/line_follow/firmware/line_follow_model_fake.c
+```
+
+The build script chooses the newest `checkpoints/line_follow/**/*.bin` by
+default. For a specific model, set `LINE_FOLLOW_WEIGHTS=/path/to/checkpoint.bin`.
+It generates an embedded C header, compiles the Propeller C firmware, and prints
+the checkpoint path at runtime:
+
+```text
+ocean/line_follow/scripts/parallax-build-line-follow-model-fake.sh
+timeout 20s ocean/line_follow/scripts/parallax-run-line-follow-model-fake.sh /dev/ttyUSB0
+```
+
+This firmware runs on the robot. It does not read QTI pins, does not command
+motors, and does not write EEPROM. It injects canned normalized observations,
+runs the embedded trained PufferLib model forward pass in Propeller C, and
+prints:
+
+```text
+M name obs0 obs1 obs2 obs3 action0 action1 left right
+```
+
+Current host-side smoke output for the measured-control checkpoint:
+
+```text
+weights=/home/claude/sim2real/checkpoints/line_follow/1779950360328/0000000199753728.bin
+scale: action [-1,1] -> +/-0.010 m/s -> approx +/-3.1 ticks/s
+all_white     ticks/s=[ 3  3]
+center_black  ticks/s=[ 6  5]
+left_black    ticks/s=[-6  6]
+right_black   ticks/s=[ 5 -3]
+outer_left    ticks/s=[-6  4]
+outer_right   ticks/s=[-6  6]  # wrong direction for a pure outer-right hit
+inner_left    ticks/s=[ 2  6]
+inner_right   ticks/s=[ 6  1]
+soft_left     ticks/s=[-3  6]
+soft_right    ticks/s=[ 6  0]
+```
+
+Earlier Propeller fake-observation runs matched host-side native C smoke for the
+same checkpoint and cases, confirming the checkpoint format, weight alignment,
+MinGRU single-step recurrence, decoder output, action clamp/deadband, and wheel
+tick scaling on the robot. Re-run the Propeller fake-observation test for any
+new checkpoint before enabling drive.
+
+## Propeller C Live QTI Model Telemetry
+
+After the QTI sensors are attached, use live telemetry mode before enabling any
+drive output:
+
+```text
+ocean/line_follow/firmware/line_follow_model_live.c
+```
+
+This firmware runs on the robot. It reads the real QTI sensors, normalizes them,
+runs the embedded trained model, prints raw/min/max/obs/action/ticks, and does
+not command motors unless built with `--drive`.
+
+Build and run the telemetry-only version:
+
+```text
+ocean/line_follow/scripts/parallax-build-line-follow-model-live.sh
+timeout 180s ocean/line_follow/scripts/parallax-run-line-follow-model-live.sh --log ocean/line_follow/build/line-follow/model-live-last.txt /dev/ttyUSB0
+```
+
+Analyze the captured data:
+
+```text
+ocean/line_follow/scripts/analyze-line-follow-live-log.py ocean/line_follow/build/line-follow/model-live-last.txt
+```
+
+The live row format is:
+
+```text
+L step raw0 raw1 raw2 raw3 min0 min1 min2 min3 max0 max1 max2 max3 obs0 obs1 obs2 obs3 action0 action1 left right
+```
+
+For loop timing measurements, run the loader with `--host-timestamps`. The host
+then prefixes each `L` row with a high-resolution timestamp, and
+`analyze-line-follow-live-log.py` reports `host_loop_ms` by dividing elapsed host
+time by telemetry step deltas. Older logs may include a trailing Propeller
+`dt_ms` field; the analyzer still accepts it, but host timestamps are the current
+verified path.
+
+The QTI polarity assumption is that lower raw RC-time values are
+brighter/whiter and higher raw values are darker/blacker. Current normalization
+constants are:
+
+```text
+QTI_WHITE_TIME=40
+QTI_BLACK_TIME=350
+QTI_THRESHOLD_Q1000=500
+```
+
+The Propeller model-live and sanity build scripts read their default
+`QTI_WHITE_TIME` and `QTI_BLACK_TIME` values from `config/line_follow.ini`, so
+the firmware and trainable sim use the same normalization constants by default.
+Override these at build time only for targeted hardware tests:
+
+```text
+QTI_WHITE_TIME=... QTI_BLACK_TIME=... ocean/line_follow/scripts/parallax-build-line-follow-model-live.sh
+```
+
+First real telemetry dump result:
+
+```text
+rows=399
+raw min/max:
+  outer_left   23..2563
+  inner_left   15..2256
+  inner_right  26..1748
+  outer_right  23..1700
+raw p05/p50/p95:
+  outer_left   42/46/328
+  inner_left   26/34/252
+  inner_right  38/42/269
+  outer_right  39/41/230
+```
+
+The old global `QTI_WHITE_TIME=100` compressed white readings for this hardware.
+The p05/p95 values below are useful range targets, not fixed per-sensor constants
+to bake into a model:
+
+```text
+white = [42, 26, 38, 39]
+black = [328, 252, 269, 230]
+```
+
+The trainable sim should treat those values as evidence for domain
+randomization. Current retrain defaults use nominal `qti_white_time=40` and
+`qti_black_time=350`, then randomize actual per-sensor response each episode
+with `qti_white_jitter=25` and `qti_black_jitter=120`. Observations are always
+clamped after normalization, so the policy never receives values outside
+`[0, 1]`. The Propeller side uses the same clamp formula:
+`clamp((raw - white) / (black - white), 0, 1)`.
+
+The run also produced timeout/off-paper style rows where all sensors jumped high
+at once, for example `[2563, 2256, 1748, 1700]`. Treat those separately from
+normal black-line calibration.
+
+The drive-enabled build exists for later staged tests only:
+
+```text
+ocean/line_follow/scripts/parallax-build-line-follow-model-live.sh --drive
+ocean/line_follow/scripts/parallax-run-line-follow-model-live.sh --drive /dev/ttyUSB0
+```
+
+## Propeller C Sanity Harness
+
+Before perfecting the learned model, use the Propeller C sanity harness to test
+the robot-side interface directly:
+
+```text
+ocean/line_follow/firmware/line_follow_sanity.c
+```
+
+With no QTI sensors attached, use fake-observation mode first. This mode does
+not read QTI pins and does not command motors; it feeds canned normalized
+observations through the Propeller C policy stub and prints the resulting wheel
+commands:
+
+```text
+ocean/line_follow/scripts/parallax-build-line-follow-sanity.sh --fake
+timeout 20s ocean/line_follow/scripts/parallax-run-line-follow-sanity.sh --fake /dev/ttyUSB0
+```
+
+The fake-observation output table is:
+
+```text
+F name obs0 obs1 obs2 obs3 left right
+F all_white 0.000 0.000 0.000 0.000 12 -12
+F all_black 1.000 1.000 1.000 1.000 20 20
+F center_black 0.000 1.000 1.000 0.000 20 20
+F left_black 1.000 1.000 0.000 0.000 -16 40
+F right_black 0.000 0.000 1.000 1.000 40 -16
+F outer_left 1.000 0.000 0.000 0.000 2 38
+F outer_right 0.000 0.000 0.000 1.000 38 2
+F inner_left 0.000 1.000 0.000 0.000 2 38
+F inner_right 0.000 0.000 1.000 0.000 38 2
+F soft_left 0.400 0.800 0.100 0.000 1 39
+F soft_right 0.000 0.100 0.800 0.400 39 1
+```
+
+The default build is telemetry-only. It reads four QTI sensors with
+`high(pin); pause(1); rc_time(pin, 1)`, normalizes each reading to the sim
+polarity as integer `0..1000`, runs a small policy-shaped stub, and prints:
+
+```text
+S raw0 raw1 raw2 raw3 obs0 obs1 obs2 obs3 left right
+```
+
+Default sensor order and pins are:
+
+```text
+obs[0] outer_left   P7
+obs[1] inner_left   P6
+obs[2] inner_right  P5
+obs[3] outer_right  P4
+```
+
+Override pin or calibration values at build time with environment variables:
+
+```text
+QTI_OUTER_LEFT_PIN=...
+QTI_INNER_LEFT_PIN=...
+QTI_INNER_RIGHT_PIN=...
+QTI_OUTER_RIGHT_PIN=...
+QTI_WHITE_TIME=...
+QTI_BLACK_TIME=...
+QTI_THRESHOLD_Q1000=...
+```
+
+Verified build commands from `/home/claude/sim2real`:
+
+```text
+ocean/line_follow/scripts/parallax-build-line-follow-sanity.sh
+ocean/line_follow/scripts/parallax-build-line-follow-sanity.sh --fake
+ocean/line_follow/scripts/parallax-build-line-follow-sanity.sh --drive
+```
+
+The telemetry-only ELF is about 9.3 KB. The fake-observation ELF is about 9.7
+KB. The `--drive` ELF links `abdrive.h` and is about 16.6 KB. The drive-enabled
+build is intentionally explicit and defaults to a bounded run; use it only with
+the robot safely staged.
+
+RAM-only load commands for the next hardware session:
+
+```text
+timeout 20s ocean/line_follow/scripts/parallax-run-line-follow-sanity.sh --fake /dev/ttyUSB0
+ocean/line_follow/scripts/parallax-run-line-follow-sanity.sh /dev/ttyUSB0
+ocean/line_follow/scripts/parallax-run-line-follow-sanity.sh --drive /dev/ttyUSB0
+```
+
+These wrappers use `propeller-load -r -t` and do not write EEPROM.
 
 ## Open Measurement Work
 

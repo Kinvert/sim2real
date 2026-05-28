@@ -13,6 +13,8 @@ void my_init(Env* env, Dict* kwargs) {
     env->num_agents = 1;
 
     env->dt = dict_get(kwargs, "dt")->value;
+    env->dt_min = dict_get(kwargs, "dt_min")->value;
+    env->dt_max = dict_get(kwargs, "dt_max")->value;
     env->max_steps = dict_get(kwargs, "max_steps")->value;
     env->max_wheel_speed_mps = dict_get(kwargs, "max_wheel_speed_mps")->value;
     env->wheel_base_m = dict_get(kwargs, "wheel_base_m")->value;
@@ -28,6 +30,9 @@ void my_init(Env* env, Dict* kwargs) {
     env->lost_line_limit = dict_get(kwargs, "lost_line_limit")->value;
     env->track_family = dict_get(kwargs, "track_family")->value;
     env->max_track_gen_attempts = dict_get(kwargs, "max_track_gen_attempts")->value;
+    env->policy_hidden_size = dict_get(kwargs, "policy_hidden_size")->value;
+    env->policy_num_layers = dict_get(kwargs, "policy_num_layers")->value;
+    env->model_dt_enabled = dict_get(kwargs, "model_dt_enabled")->value;
 
     env->progress_reward_scale = dict_get(kwargs, "progress_reward_scale")->value;
     env->centerline_penalty_scale = dict_get(kwargs, "centerline_penalty_scale")->value;
@@ -47,14 +52,19 @@ void my_init(Env* env, Dict* kwargs) {
     env->qti_threshold = dict_get(kwargs, "qti_threshold")->value;
     env->qti_white_time = dict_get(kwargs, "qti_white_time")->value;
     env->qti_black_time = dict_get(kwargs, "qti_black_time")->value;
+    env->qti_white_jitter = dict_get(kwargs, "qti_white_jitter")->value;
+    env->qti_black_jitter = dict_get(kwargs, "qti_black_jitter")->value;
     env->qti_timeout = dict_get(kwargs, "qti_timeout")->value;
 
     env->line_width_m = dict_get(kwargs, "line_width_m")->value;
+    env->line_width_jitter_m = dict_get(kwargs, "line_width_jitter_m")->value;
     env->line_edge_softness_m = dict_get(kwargs, "line_edge_softness_m")->value;
+    env->line_edge_softness_jitter_m = dict_get(kwargs, "line_edge_softness_jitter_m")->value;
     env->track_bounds_m = dict_get(kwargs, "track_bounds_m")->value;
     env->start_lateral_offset_m = dict_get(kwargs, "start_lateral_offset_m")->value;
     env->start_heading_offset_rad = dict_get(kwargs, "start_heading_offset_rad")->value;
 
+    apply_model_timing(env);
     init(env);
 }
 
