@@ -500,15 +500,15 @@ ActivityBot speed window: `action=0.5` is about `18 ticks/s`, and `action=1.0`
 is about `36 ticks/s`. At the default H8/L0 measured `dt=0.024`, full-speed
 travel is about `2.78 mm` per policy decision.
 `progress_reward_scale = 1.0`, `time_penalty = 0.005`, and
-`idle_penalty = 0.03` keep centered forward progress positive while making
+`idle_penalty = 0.02` keep centered forward progress positive while making
 stopped or crawling policies lose reward. The env also pays a fixed 0..1
 centerline-quality bonus every `centerline_reward_interval_m = 0.010` meters of
 true progress and penalizes low average wheel command. With
 `min_wheel_action = 0.35`, a pivot with one wheel stopped must drive the outside
 wheel at roughly 70% command to avoid the idle penalty.
-`turn_speed_penalty_scale = 0.08` adds a smaller privileged penalty when a
+`turn_speed_penalty_scale = 0.05` adds a smaller privileged penalty when a
 corrective turn is needed but the desired outside wheel is below
-`min_turn_outer_action = 0.70`.
+`min_turn_outer_action = 0.65`.
 `firmware_loop_ms = 0` means the Propeller loop does not request an extra
 post-inference pause; real control period is then
 determined by QTI reads, model inference, drive calls, and serial printing.
@@ -978,8 +978,11 @@ devices; if training fails with `CUDA is not available`, rerun with GPU-visible
 permissions rather than switching to the CPU backend. Do not add ad hoc
 `--train.total-timesteps ...` overrides for line-follow probes; use the
 checked-in `config/line_follow.ini` budget unless the user explicitly requests a
-different budget. Sweeps should also use the checked-in training budget unless
-explicitly told otherwise. The eval command loops until the raylib window exits; for a
+different budget. The current standard budget is 100M timesteps; reserve 200M
+for explicit long polish runs. Sweeps should also use the checked-in training
+budget unless explicitly told otherwise, and the current sweep pins the deployed
+H8/L0 policy shape while varying training, reward, and control values. The eval
+command loops until the raylib window exits; for a
 bounded render/load smoke check, prefix with `PYTHONUNBUFFERED=1 DISPLAY=:0
 timeout 10s`.
 

@@ -126,23 +126,25 @@ static void test_measured_geometry_defaults(void) {
         "centerline bonus pays out every ten millimeters");
     expect_near(env.success_reward, 1.0f, 1e-6f,
         "survival success bonus has default scale");
-    expect_near(env.lost_line_penalty, 0.04f, 1e-6f,
-        "lost line penalty matches the original dense-reward training setup");
+    expect_near(env.heading_penalty_scale, 0.0f, 1e-6f,
+        "separate heading penalty is disabled because checkpoint accuracy handles it indirectly");
+    expect_near(env.lost_line_penalty, 0.03f, 1e-6f,
+        "lost line penalty preserves shaping without dominating checkpoint accuracy");
     expect_near(env.off_track_terminal_penalty, 1.0f, 1e-6f,
         "off-track terminal penalty defaults to the largest clipped negative reward");
-    expect_near(env.action_bound_penalty_scale, 0.05f, 1e-6f,
-        "raw action bound penalty discourages saturated policy means");
+    expect_near(env.action_bound_penalty_scale, 0.01f, 1e-6f,
+        "raw action bound penalty stays small so it does not suppress usable turn commands");
     expect_near(env.turn_penalty_scale, 0.0f, 1e-6f,
         "turn command penalty is disabled so steering itself is not punished");
-    expect_near(env.steering_correction_scale, 0.25f, 1e-6f,
+    expect_near(env.steering_correction_scale, 0.30f, 1e-6f,
         "privileged steering correction reward teaches the signed turn direction");
-    expect_near(env.turn_speed_penalty_scale, 0.08f, 1e-6f,
+    expect_near(env.turn_speed_penalty_scale, 0.05f, 1e-6f,
         "turn speed penalty discourages weak outside-wheel turns");
-    expect_near(env.min_turn_outer_action, 0.70f, 1e-6f,
+    expect_near(env.min_turn_outer_action, 0.65f, 1e-6f,
         "corrective turns target a fast outside wheel");
     expect_near(env.time_penalty, 0.005f, 1e-6f,
         "per-tick time penalty discourages crawling or stopping");
-    expect_near(env.idle_penalty, 0.03f, 1e-6f,
+    expect_near(env.idle_penalty, 0.02f, 1e-6f,
         "idle wheel penalty prevents centered stop reward hacking");
     expect_near(env.min_wheel_action, 0.35f, 1e-6f,
         "idle threshold pushes pivot turns to keep the outside wheel moving");
