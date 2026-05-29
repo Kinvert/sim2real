@@ -147,7 +147,7 @@ static void accumulate_step_stats(LineFollow* env, BenchStats* stats) {
     stats->wheel_cmd_sum[1] += cmd.right_mps;
     float forward = 0.5f * (cmd.left_mps + cmd.right_mps);
     stats->speed_frac_sum += clampf(forward / fmaxf(env->max_wheel_speed_mps, 1e-6f), 0.0f, 1.0f);
-    if (fmaxf(cmd.left_mps, cmd.right_mps) < env->min_wheel_action * env->max_wheel_speed_mps) {
+    if (forward < env->min_wheel_action * env->max_wheel_speed_mps) {
         stats->idle_steps += 1;
     }
     if (obs_all_white(env)) {

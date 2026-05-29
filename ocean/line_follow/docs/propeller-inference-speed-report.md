@@ -263,17 +263,17 @@ accum_q30 = sum(obs_q15 * weight_q15)
 action_q15 = accum_q30 >> 15
 ```
 
-Then clamp and convert to ticks with integer math. The current max speed is
-small:
+Then clamp and convert to ticks with integer math. The current deployment speed
+is:
 
 ```text
-1.0 action -> 0.038 m/s
-0.038 m/s with 65 mm tires and 64 ticks/rev -> about 12 ticks/s
+1.0 action -> 0.116 m/s
+0.116 m/s with 65 mm tires and 64 ticks/rev -> about 36 ticks/s
 ```
 
-The current deployment mapping is non-reversing: `action=-1` maps to stopped,
-`action=0` maps to about 6 ticks/s, `action=0.5` maps to about 9 ticks/s, and
-`action=1` maps to about 12 ticks/s. So deployment can compute an action score
+The current deployment mapping is non-reversing: `action<=0` maps to stopped,
+`action=0.5` maps to about 18 ticks/s, and `action=1` maps to about 36 ticks/s.
+So deployment can compute an action score
 in fixed point, apply the 0.04 deadband threshold in the same scale, clamp
 negatives to zero, and map to ticks.
 

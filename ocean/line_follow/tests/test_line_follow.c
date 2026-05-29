@@ -113,8 +113,8 @@ static void test_measured_geometry_defaults(void) {
     expect_near(env.dt, 0.024f, 1e-6f, "nominal control period matches measured sparse Prop C loop timing");
     expect_near(env.dt_min, 0.020f, 1e-6f, "minimum randomized control period is the measured lower bound");
     expect_near(env.dt_max, 0.035f, 1e-6f, "maximum randomized control period covers slower real-loop jitter");
-    expect_near(env.max_wheel_speed_mps * env.dt, 0.000912f, 1e-6f,
-        "full-speed travel per decision matches the calibrated 12 tick/s speed window");
+    expect_near(env.max_wheel_speed_mps * env.dt, 0.002784f, 1e-6f,
+        "full-speed travel per decision matches the doubled speed window");
     expect_true(env.model_dt_enabled == 1, "model-aware dt scaling is enabled by default");
     expect_true(env.policy_hidden_size == 8, "default policy timing hidden size matches config default");
     expect_true(env.policy_num_layers == 0, "default policy timing feed-forward layer count matches config default");
@@ -136,17 +136,21 @@ static void test_measured_geometry_defaults(void) {
         "turn command penalty is disabled so steering itself is not punished");
     expect_near(env.steering_correction_scale, 0.25f, 1e-6f,
         "privileged steering correction reward teaches the signed turn direction");
+    expect_near(env.turn_speed_penalty_scale, 0.08f, 1e-6f,
+        "turn speed penalty discourages weak outside-wheel turns");
+    expect_near(env.min_turn_outer_action, 0.70f, 1e-6f,
+        "corrective turns target a fast outside wheel");
     expect_near(env.time_penalty, 0.005f, 1e-6f,
         "per-tick time penalty discourages crawling or stopping");
-    expect_near(env.idle_penalty, 0.02f, 1e-6f,
+    expect_near(env.idle_penalty, 0.03f, 1e-6f,
         "idle wheel penalty prevents centered stop reward hacking");
-    expect_near(env.min_wheel_action, 0.25f, 1e-6f,
-        "idle threshold requires average wheel command above a quarter of max speed");
+    expect_near(env.min_wheel_action, 0.35f, 1e-6f,
+        "idle threshold pushes pivot turns to keep the outside wheel moving");
     expect_near(env.track_complete_margin_m, 0.02f, 1e-6f,
         "completion margin is scaled for paper-sized tracks");
     expect_near(env.wheel_base_m, 0.125f, 1e-6f, "measured tire-to-tire width is default wheel base");
-    expect_near(env.max_wheel_speed_mps, 0.038f, 1e-6f,
-        "robot max wheel speed matches the calibrated 12 tick/s fast speed");
+    expect_near(env.max_wheel_speed_mps, 0.116f, 1e-6f,
+        "robot max wheel speed uses the doubled deployment window");
     expect_near(env.body_ahead_m, 0.040f, 1e-6f, "measured body ahead of axle is default");
     expect_near(env.body_behind_m, 0.090f, 1e-6f, "measured body behind axle is default");
     expect_near(env.tire_diameter_m, 0.065f, 1e-6f, "measured tire diameter is default");

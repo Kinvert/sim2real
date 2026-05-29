@@ -14,7 +14,7 @@
 #define NUM_LAYERS 0
 #endif
 #ifndef MAX_WHEEL_SPEED_MPS
-#define MAX_WHEEL_SPEED_MPS 0.038f
+#define MAX_WHEEL_SPEED_MPS 0.116f
 #endif
 #define COMMAND_DEADBAND 0.04f
 #define TIRE_DIAMETER_M 0.065f

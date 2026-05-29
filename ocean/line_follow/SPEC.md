@@ -495,15 +495,20 @@ H16/L1 -> 477 ms
 
 When derived `dt` changes, `max_steps` and `lost_line_limit` are scaled
 inversely so larger/slower models do not receive extra wall-clock episode time
-or lost-line grace. The current `max_wheel_speed_mps = 0.038` uses the
-post-calibration ActivityBot speed window: about `6 ticks/s` slow,
-`9 ticks/s` medium, and `12 ticks/s` fast. At the default H8/L0 measured
-`dt=0.024`, full-speed travel is about `0.91 mm` per policy decision.
+or lost-line grace. The current `max_wheel_speed_mps = 0.116` is the doubled
+ActivityBot speed window: `action=0.5` is about `18 ticks/s`, and `action=1.0`
+is about `36 ticks/s`. At the default H8/L0 measured `dt=0.024`, full-speed
+travel is about `2.78 mm` per policy decision.
 `progress_reward_scale = 1.0`, `time_penalty = 0.005`, and
-`idle_penalty = 0.02` keep centered forward progress positive while making
+`idle_penalty = 0.03` keep centered forward progress positive while making
 stopped or crawling policies lose reward. The env also pays a fixed 0..1
 centerline-quality bonus every `centerline_reward_interval_m = 0.010` meters of
-true progress and penalizes both wheel commands being idle.
+true progress and penalizes low average wheel command. With
+`min_wheel_action = 0.35`, a pivot with one wheel stopped must drive the outside
+wheel at roughly 70% command to avoid the idle penalty.
+`turn_speed_penalty_scale = 0.08` adds a smaller privileged penalty when a
+corrective turn is needed but the desired outside wheel is below
+`min_turn_outer_action = 0.70`.
 `firmware_loop_ms = 0` means the Propeller loop does not request an extra
 post-inference pause; real control period is then
 determined by QTI reads, model inference, drive calls, and serial printing.
@@ -705,6 +710,8 @@ Per-step reward components:
 - lost_line_penalty when privileged geometry says the line left the sensor span
 - time_penalty every tick to discourage crawling or stopping
 - idle_penalty when average post-deadband wheel command is below threshold
+- turn_speed_penalty when the desired outside wheel is too slow during a
+  privileged corrective turn
 - negative wheel commands clamp that wheel to stopped and receive
   reverse_penalty_scale proportional to the negative command amount
 + success_reward on timeout or track completion only if the robot stayed on
@@ -1194,11 +1201,11 @@ obs[3] -> raw continuous action[2] -> clamped m/s -> approximate ticks/second
 It uses the deployment geometry/scaling assumptions:
 
 ```text
-action [-1, 1] -> [0, 0.038] m/s
-approximately [0, 12] ActivityBot ticks/s
+action [-1, 1] -> [0, 0.116] m/s
+approximately [0, 36] ActivityBot ticks/s
 action 0.0 -> 0 ticks/s
-action 0.5 -> about 6 ticks/s
-action 1.0 -> about 12 ticks/s
+action 0.5 -> about 18 ticks/s
+action 1.0 -> about 36 ticks/s
 65 mm tire diameter
 64 encoder ticks / wheel revolution
 ```

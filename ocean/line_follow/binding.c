@@ -45,6 +45,8 @@ void my_init(Env* env, Dict* kwargs) {
     env->action_bound_penalty_scale = dict_get(kwargs, "action_bound_penalty_scale")->value;
     env->turn_penalty_scale = dict_get(kwargs, "turn_penalty_scale")->value;
     env->steering_correction_scale = dict_get(kwargs, "steering_correction_scale")->value;
+    env->turn_speed_penalty_scale = dict_get(kwargs, "turn_speed_penalty_scale")->value;
+    env->min_turn_outer_action = dict_get(kwargs, "min_turn_outer_action")->value;
     env->time_penalty = dict_get(kwargs, "time_penalty")->value;
     env->idle_penalty = dict_get(kwargs, "idle_penalty")->value;
     env->min_wheel_action = dict_get(kwargs, "min_wheel_action")->value;
@@ -92,6 +94,8 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "progress_target_m", log->progress_target_m);
     dict_set(out, "avg_forward_speed_mps", log->avg_forward_speed_mps);
     dict_set(out, "avg_speed_frac", log->avg_speed_frac);
+    dict_set(out, "idle_frac", log->idle_frac);
+    dict_set(out, "turn_outer_speed_frac", log->turn_outer_speed_frac);
     dict_set(out, "negative_action_frac", log->negative_action_frac);
     dict_set(out, "action_bound_violation", log->action_bound_violation);
     dict_set(out, "raw_action_abs", log->raw_action_abs);

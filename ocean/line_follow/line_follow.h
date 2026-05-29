@@ -40,6 +40,8 @@ struct Log {
     float progress_target_m;
     float avg_forward_speed_mps;
     float avg_speed_frac;
+    float idle_frac;
+    float turn_outer_speed_frac;
     float negative_action_frac;
     float action_bound_violation;
     float raw_action_abs;
@@ -124,12 +126,14 @@ struct LineFollow {
     int perf_checkpoint_count;
     float forward_speed_sum;
     float speed_frac_sum;
+    float turn_outer_speed_frac_sum;
     float action_bound_violation_sum;
     float raw_action_abs_sum;
     float centerline_error;
     float centerline_error_sum;
     float heading_error;
     float last_reward;
+    int turn_step_count;
     float terminal_timeout;
     float terminal_lost_line;
     float terminal_too_far;
@@ -149,6 +153,8 @@ struct LineFollow {
     float action_bound_penalty_scale;
     float turn_penalty_scale;
     float steering_correction_scale;
+    float turn_speed_penalty_scale;
+    float min_turn_outer_action;
     float time_penalty;
     float idle_penalty;
     float min_wheel_action;
@@ -219,7 +225,7 @@ void set_defaults(LineFollow* env) {
     env->dt_min = 0.020f;
     env->dt_max = 0.035f;
     env->episode_dt = env->dt;
-    env->max_wheel_speed_mps = 0.038f;
+    env->max_wheel_speed_mps = 0.116f;
     env->wheel_base_m = 0.125f;
     env->body_ahead_m = 0.040f;
     env->body_behind_m = 0.090f;
@@ -242,9 +248,11 @@ void set_defaults(LineFollow* env) {
     env->action_bound_penalty_scale = 0.05f;
     env->turn_penalty_scale = 0.0f;
     env->steering_correction_scale = 0.25f;
+    env->turn_speed_penalty_scale = 0.08f;
+    env->min_turn_outer_action = 0.70f;
     env->time_penalty = 0.005f;
-    env->idle_penalty = 0.02f;
-    env->min_wheel_action = 0.25f;
+    env->idle_penalty = 0.03f;
+    env->min_wheel_action = 0.35f;
     env->reverse_penalty_scale = 0.2f;
     env->too_far_m = 0.09f;
     env->track_complete_margin_m = 0.02f;
@@ -300,12 +308,14 @@ void init(LineFollow* env) {
     env->perf_checkpoint_count = 0;
     env->forward_speed_sum = 0.0f;
     env->speed_frac_sum = 0.0f;
+    env->turn_outer_speed_frac_sum = 0.0f;
     env->action_bound_violation_sum = 0.0f;
     env->raw_action_abs_sum = 0.0f;
     env->centerline_error = 0.0f;
     env->centerline_error_sum = 0.0f;
     env->heading_error = 0.0f;
     env->last_reward = 0.0f;
+    env->turn_step_count = 0;
     env->terminal_timeout = 0.0f;
     env->terminal_lost_line = 0.0f;
     env->terminal_too_far = 0.0f;
@@ -434,6 +444,12 @@ void add_log(LineFollow* env) {
     float avg_speed_frac = episode_length > 0.0f
         ? env->speed_frac_sum / episode_length
         : 0.0f;
+    float idle_frac = episode_length > 0.0f
+        ? (float)env->idle_steps / episode_length
+        : 0.0f;
+    float turn_outer_speed_frac = env->turn_step_count > 0
+        ? env->turn_outer_speed_frac_sum / (float)env->turn_step_count
+        : 0.0f;
     float negative_action_frac = episode_length > 0.0f
         ? (float)env->negative_action_steps / episode_length
         : 0.0f;
@@ -459,6 +475,8 @@ void add_log(LineFollow* env) {
     env->log.progress_target_m += target_progress;
     env->log.avg_forward_speed_mps += avg_forward_speed;
     env->log.avg_speed_frac += avg_speed_frac;
+    env->log.idle_frac += idle_frac;
+    env->log.turn_outer_speed_frac += turn_outer_speed_frac;
     env->log.negative_action_frac += negative_action_frac;
     env->log.action_bound_violation += action_bound_violation;
     env->log.raw_action_abs += raw_action_abs;
@@ -801,12 +819,14 @@ void c_reset(LineFollow* env) {
     env->perf_checkpoint_count = 0;
     env->forward_speed_sum = 0.0f;
     env->speed_frac_sum = 0.0f;
+    env->turn_outer_speed_frac_sum = 0.0f;
     env->action_bound_violation_sum = 0.0f;
     env->raw_action_abs_sum = 0.0f;
     env->last_reward = 0.0f;
     env->centerline_error = 0.0f;
     env->centerline_error_sum = 0.0f;
     env->heading_error = 0.0f;
+    env->turn_step_count = 0;
     clear_terminal_info(env);
     env->v_left = 0.0f;
     env->v_right = 0.0f;
@@ -921,6 +941,12 @@ void c_step(LineFollow* env) {
     float signed_turn = clampf(
         (cmd.right_mps - cmd.left_mps) / fmaxf(env->max_wheel_speed_mps, 1e-6f),
         -1.0f, 1.0f);
+    if (fabsf(signed_turn) >= 0.25f) {
+        float outer_mps = signed_turn > 0.0f ? cmd.right_mps : cmd.left_mps;
+        env->turn_outer_speed_frac_sum += clampf(
+            outer_mps / fmaxf(env->max_wheel_speed_mps, 1e-6f), 0.0f, 1.0f);
+        env->turn_step_count += 1;
+    }
     float command_avg_mps = 0.5f * (cmd.left_mps + cmd.right_mps);
     bool idle = command_avg_mps
         < env->min_wheel_action * fmaxf(env->max_wheel_speed_mps, 1e-6f);
@@ -934,6 +960,18 @@ void c_step(LineFollow* env) {
         env->heading_error, line_seen, forward_speed, action_delta,
         centerline_milestone_reward, signed_turn, idle, negative_action_amount,
         action_bound_violation);
+    if (env->turn_speed_penalty_scale > 0.0f
+            && fabsf(env->centerline_error) > 0.001f) {
+        float correction_need = clampf(
+            fabsf(env->centerline_error) / fmaxf(env->sensor_side_lateral_m, 1e-6f),
+            0.0f, 1.0f);
+        float desired_turn = env->centerline_error < 0.0f ? 1.0f : -1.0f;
+        float desired_outer_mps = desired_turn > 0.0f ? cmd.right_mps : cmd.left_mps;
+        float desired_outer_frac = clampf(
+            desired_outer_mps / fmaxf(env->max_wheel_speed_mps, 1e-6f), 0.0f, 1.0f);
+        float shortfall = fmaxf(env->min_turn_outer_action - desired_outer_frac, 0.0f);
+        reward -= env->turn_speed_penalty_scale * correction_need * shortfall;
+    }
     reward = clampf(reward, -1.0f, 1.0f);
     env->rewards[0] = reward;
     env->last_reward = reward;
