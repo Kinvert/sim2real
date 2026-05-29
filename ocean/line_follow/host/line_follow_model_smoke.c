@@ -16,7 +16,9 @@
 #ifndef MAX_WHEEL_SPEED_MPS
 #define MAX_WHEEL_SPEED_MPS 0.116f
 #endif
+#ifndef COMMAND_DEADBAND
 #define COMMAND_DEADBAND 0.04f
+#endif
 #define TIRE_DIAMETER_M 0.065f
 #define TICKS_PER_REV 64.0f
 

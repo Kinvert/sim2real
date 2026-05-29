@@ -68,6 +68,7 @@ void my_init(Env* env, Dict* kwargs) {
 
     env->line_width_m = dict_get(kwargs, "line_width_m")->value;
     env->line_width_jitter_m = dict_get(kwargs, "line_width_jitter_m")->value;
+    env->line_width_segment_jitter_m = dict_get(kwargs, "line_width_segment_jitter_m")->value;
     env->line_edge_softness_m = dict_get(kwargs, "line_edge_softness_m")->value;
     env->line_edge_softness_jitter_m = dict_get(kwargs, "line_edge_softness_jitter_m")->value;
     env->track_bounds_m = dict_get(kwargs, "track_bounds_m")->value;
@@ -84,6 +85,9 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "progress_frac", log->progress_frac);
     dict_set(out, "distance_progress_frac", log->distance_progress_frac);
     dict_set(out, "progress_m", log->progress_m);
+    dict_set(out, "effective_progress_m", log->effective_progress_m);
+    dict_set(out, "center_path_m", log->center_path_m);
+    dict_set(out, "path_efficiency", log->path_efficiency);
     dict_set(out, "episode_return", log->episode_return);
     dict_set(out, "episode_length", log->episode_length);
     dict_set(out, "centerline_error", log->centerline_error);

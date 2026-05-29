@@ -184,18 +184,18 @@ tire diameter:                     65 mm = 0.065 m
 body behind axle:                  90 mm = 0.090 m
 body ahead of axle:                40 mm = 0.040 m
 total body length around axle:    130 mm = 0.130 m
-QTI sensor forward offset:         45 mm = 0.045 m ahead of axle
-side QTI lateral offsets:         +/-20 mm = +/-0.020 m from robot centerline
+QTI sensor forward offset:       43.5 mm = 0.0435 m ahead of axle
+side QTI lateral offsets:         +/-18 mm = +/-0.018 m from robot centerline
 middle QTI lateral offset:          0 mm = 0.000 m from robot centerline
-left-to-right policy spread:       40 mm = 0.040 m
+left-to-right policy spread:       36 mm = 0.036 m
 ```
 
 Nominal QTI body-frame positions:
 
 ```text
-left    = (forward_m = 0.045, lateral_m =  0.020)
-middle  = (forward_m = 0.045, lateral_m =  0.000)
-right   = (forward_m = 0.045, lateral_m = -0.020)
+left    = (forward_m = 0.0435, lateral_m =  0.018)
+middle  = (forward_m = 0.0435, lateral_m =  0.000)
+right   = (forward_m = 0.0435, lateral_m = -0.018)
 ```
 
 The sim and renderer should treat these as the nominal geometry before applying
@@ -204,10 +204,10 @@ between outer tire faces rather than wheel contact centerlines, update
 `wheel_base_m` separately; the differential-drive model needs center-to-center
 wheel contact spacing.
 
-Current retrain defaults randomize both forward and lateral QTI positions by
-`0.0025 m` to reflect measured build imprecision without overwhelming the
-nominal sensor geometry. Sensor failure
-randomization is intentionally left out of the next retrain.
+Current retrain defaults randomize lateral QTI positions by `0.004 m` and
+forward positions by `0.003 m` to reflect measured build imprecision without
+overwhelming the nominal sensor geometry. Sensor failure randomization is
+intentionally left out of the next retrain.
 
 The current top-down renderer still uses visual placeholders for unmeasured
 widths: `body_width_m = 0.075` and `tire_width_m = 0.012`. These affect only
@@ -262,9 +262,9 @@ template for line following.
 
 The line-following track should be represented as a geometric centerline plus a
 black-line width. The black line is the swept strip around that centerline, with
-edge softness and reflectivity variation. The line width should be randomized
-around real marker/tape widths; start around 5 mm for marker-like lines, then
-widen the range after the basic policy trains.
+edge softness and reflectivity variation. The default hand-drawn stripe model is
+an 18 mm nominal line, randomized per episode by +/-6 mm, with an additional
+smooth per-segment width wobble of +/-2 mm along the sampled track.
 
 The track representation should support two related forms:
 
@@ -403,7 +403,8 @@ Track generation should expose:
 
 ```text
 line_width_m
-line_width_variation_m
+line_width_jitter_m
+line_width_segment_jitter_m
 line_edge_softness_m
 line_reflectance_noise
 track_length_m
@@ -501,9 +502,10 @@ is about `36 ticks/s`. At the default H8/L0 measured `dt=0.024`, full-speed
 travel is about `2.78 mm` per policy decision.
 `progress_reward_scale = 1.0`, `time_penalty = 0.005`, and
 `idle_penalty = 0.02` keep centered forward progress positive while making
-stopped or crawling policies lose reward. The env also pays a fixed 0..1
-centerline-quality bonus every `centerline_reward_interval_m = 0.010` meters of
-true progress and penalizes low average wheel command. With
+stopped or crawling policies lose reward. The env records centerline quality
+every `centerline_reward_interval_m = 0.010` meters for debug, but training
+reward is continuous per tick rather than a checkpoint bonus. It also penalizes
+low average wheel command. With
 `min_wheel_action = 0.35`, a pivot with one wheel stopped must drive the outside
 wheel at roughly 70% command to avoid the idle penalty.
 `turn_speed_penalty_scale = 0.05` adds a smaller privileged penalty when a
@@ -704,7 +706,6 @@ Per-step reward components:
 
 ```text
 + normalized per-tick true progress * reward_centerline_score * progress_reward_scale
-+ every 10 mm of true progress: reward_centerline_score
 - optional centerline_distance_penalty from privileged true state
 - heading_error_penalty from privileged track tangent
 - lost_line_penalty when privileged geometry says the line left the sensor span
@@ -732,23 +733,33 @@ and terminal bonus terms are applied.
 0.000 at 30 mm and beyond
 ```
 
-With side sensors at +/-20 mm and an 18 mm nominal stripe, 30 mm is the
+With side sensors at +/-18 mm and an 18 mm nominal stripe, 30 mm is the
 zero-quality point for centerline accuracy. Lost-line termination remains based
 on privileged sensor-span geometry and may allow a few extra millimeters because
 line width, edge softness, and sensor placement are randomized.
 
-For reward shaping, `reward_centerline_score` uses the same 30 mm scale but is
-signed and clipped:
+For reward shaping, `reward_centerline_score` is steeper than the logged
+accuracy metric and is signed/clipped:
 
 ```text
 1.0 at 0 mm centerline error
- 0.0 at 30 mm centerline error
--1.0 at 60 mm centerline error and beyond
+ 0.0 at 15 mm centerline error
+-1.0 at 30 mm centerline error and beyond
 ```
 
-`perf` and checkpoint accuracy remain bounded 0..1 metrics for W&B and model
-selection. Training reward uses the signed score so blind forward progress after
-losing the line becomes negative rather than merely unrewarded.
+`perf` is a bounded 0..1 model-selection metric based on continuous effective
+progress. Each positive centerline-progress delta contributes:
+
+```text
+effective_progress_m += track_progress_delta_m * accuracy_score
+perf = effective_progress_m / target_progress_m, clipped to 0..1
+```
+
+`target_progress_m` is the smaller of track length and the physical distance
+available at max wheel speed over the episode horizon. Debug checkpoint counts
+still exist for telemetry, but they no longer pay reward. Training reward uses
+the signed score so blind forward progress after losing the line becomes
+negative rather than merely unrewarded.
 
 Reward should use the true simulated state, not only what the QTI sensors can
 observe. For example, if the line is between the two right sensors, the policy
@@ -806,7 +817,8 @@ qti_timeout
 sensor_failure_count
 sensor_failure_mode
 line_width_m
-line_width_variation_m
+line_width_jitter_m
+line_width_segment_jitter_m
 line_edge_softness_m
 line_reflectance_noise
 effective_line_width_jitter_m
@@ -1034,24 +1046,22 @@ The first `sim1` sweep after shrinking the deployable model plateaued near
 absolute nearest-track progress on closed loops, and the random track lengths
 were large relative to the 1 cm/s robot speed and fixed wall-clock horizon. The
 current metric starts episode progress at zero, bounds per-step progress by
-physical wheel travel, and measures `perf` from the 25 mm progress checkpoints.
-Each checkpoint contributes the current `accuracy_score`. Unreached checkpoints
-in the target progress distance count as zero, so a short-lived episode cannot
-get `perf=1.0` just because its starting pose was centered. If ten checkpoints
-are physically possible during the episode, hitting five with average accuracy
-`0.8` gives `perf = 0.8 * 5 / 10 = 0.4`.
+physical wheel travel, and measures `perf` from continuous effective progress.
+Each positive track-progress delta is multiplied by the current
+`accuracy_score`. Untraveled target distance counts as zero, so a short-lived
+episode cannot get `perf=1.0` just because its starting pose was centered. If
+`0.30 m` is physically possible during the episode, traveling `0.15 m` with
+average accuracy `0.8` gives `perf = 0.15 * 0.8 / 0.30 = 0.4`.
 The highest-reward state is centered over the line, with the middle sensor over
 the stripe and symmetric side-sensor context. Lost-line
 termination uses privileged simulator geometry: the true stripe must leave the
 actual sensor span, independent of noisy or thresholded sensor observations.
 The follow-up failure mode was centered stopping: a policy could park on the
 track and avoid most penalties. The reward now pays accuracy-scaled progress,
-pays accuracy-scaled 10 mm checkpoint bonuses, applies a time penalty every
-tick, and applies an idle penalty unless average commanded wheel speed is above
-the small motion threshold.
-Timeout/track-complete success bonuses are scaled by the same progress-times-
-accuracy `perf`, so a centered robot that has not reached checkpoints cannot
-earn a survival bonus.
+applies a time penalty every tick, and applies an idle penalty unless average
+commanded wheel speed is above the small motion threshold. Timeout/track-complete
+success bonuses are scaled by the same progress-times-accuracy `perf`, so a
+centered robot that has not moved cannot earn a survival bonus.
 
 ## Training Plan
 
@@ -1272,13 +1282,19 @@ ocean/line_follow/scripts/line-follow-policy-benchmark.sh
 
 It builds `ocean/line_follow/host/line_follow_policy_benchmark.c`, loads the
 latest checkpoint by default, uses the native `forward_puffernet` mean action,
-and runs fixed track/start cases. The output is CSV-like and includes:
+and runs fixed track/start cases. Select suites with `--suite standard`,
+`--suite stress`, `--suite seeded_random`, or `--suite all`. Use `--json PATH`
+to save the same run in machine-readable form. The wrapper canonicalizes the
+checkpoint with `realpath`; the text header and JSON both include
+`checkpoint_path` so a benchmark artifact can be used directly for robot
+deployment. The JSON also stores the model shape plus compact env, geometry,
+QTI, and reward hyperparameter snapshots. The output is CSV-like and includes:
 
 ```text
-case,steps,perf,progress_frac,progress_m,avg_raw_left,avg_raw_right,
-avg_cmd_left_mps,avg_cmd_right_mps,avg_speed_frac,idle_frac,
-all_white_frac,visible_frac,lost,timeout,complete,negative,action_bound,
-success,reward
+case,steps,perf,progress_frac,track_progress_m,effective_progress_m,
+target_progress_m,center_path_m,path_efficiency,avg_raw_left,avg_raw_right,
+avg_cmd_left_mps,avg_cmd_right_mps,avg_speed_frac,idle_frac,all_white_frac,
+visible_frac,lost,timeout,complete,negative,action_bound,success,reward
 ```
 
 Useful deterministic timing/control probes:
@@ -1287,15 +1303,16 @@ Useful deterministic timing/control probes:
 ocean/line_follow/scripts/line-follow-policy-benchmark.sh --dt 0.025
 ocean/line_follow/scripts/line-follow-policy-benchmark.sh --motor-lag-alpha 1.0
 ocean/line_follow/scripts/line-follow-policy-benchmark.sh --dt 0.025 --motor-lag-alpha 1.0
+ocean/line_follow/scripts/line-follow-policy-benchmark.sh --suite all --json ocean/line_follow/build/line-follow/benchmark.json
 ```
 
-Current benchmark finding for the measured-dt three-sensor checkpoint
-`checkpoints/line_follow/rvpus7ld/0000000199753728.bin`: deterministic model
-perf is `0.443619`, straight-controller perf is `0.441905`, and the simple
-three-sensor heuristic perf is `0.374801`. The model has sane left/right
-steering responses, but it is only barely above going straight on the fixed
-suite, so do not treat this checkpoint as closed-loop drive-approved. The main
-training issue is still policy quality, not checkpoint export plumbing.
+Recent benchmark smoke for the measured-dt H8/L0 three-sensor checkpoint
+`checkpoints/line_follow/6hsze6nn/0000000099876864.bin`: deterministic model
+all-suite perf is `0.798560`, progress fraction is `0.890772`, effective
+progress is `0.264144 m`, and average speed fraction is `0.746907`. The oval
+cases still expose low-speed/stopping behavior, so use the benchmark suite as a
+regression gate before treating a checkpoint as faster or smoother than the
+current base.
 
 ## Propeller C Live QTI Model Telemetry
 

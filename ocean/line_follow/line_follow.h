@@ -30,6 +30,9 @@ struct Log {
     float progress_frac;
     float distance_progress_frac;
     float progress_m;
+    float effective_progress_m;
+    float center_path_m;
+    float path_efficiency;
     float episode_return;
     float episode_length;
     float centerline_error;
@@ -120,6 +123,8 @@ struct LineFollow {
 
     float episode_return;
     float episode_progress;
+    float effective_progress_m;
+    float center_path_m;
     float last_progress;
     float centerline_reward_progress_m;
     float perf_quality_sum;
@@ -187,6 +192,7 @@ struct LineFollow {
     float qti_timeout;
     float line_width_m;
     float line_width_jitter_m;
+    float line_width_segment_jitter_m;
     float line_edge_softness_m;
     float line_edge_softness_jitter_m;
     float episode_line_width_m;
@@ -257,10 +263,10 @@ void set_defaults(LineFollow* env) {
     env->too_far_m = 0.09f;
     env->track_complete_margin_m = 0.02f;
 
-    env->sensor_forward_m = 0.045f;
-    env->sensor_side_lateral_m = 0.020f;
-    env->sensor_lateral_jitter_m = 0.0025f;
-    env->sensor_forward_jitter_m = 0.0025f;
+    env->sensor_forward_m = 0.0435f;
+    env->sensor_side_lateral_m = 0.018f;
+    env->sensor_lateral_jitter_m = 0.004f;
+    env->sensor_forward_jitter_m = 0.003f;
     env->sensor_noise_std = 0.0f;
     env->qti_threshold = 0.5f;
     env->qti_white_time = 40.0f;
@@ -269,7 +275,8 @@ void set_defaults(LineFollow* env) {
     env->qti_black_jitter = 120.0f;
     env->qti_timeout = 2500.0f;
     env->line_width_m = 0.018f;
-    env->line_width_jitter_m = 0.004f;
+    env->line_width_jitter_m = 0.006f;
+    env->line_width_segment_jitter_m = 0.002f;
     env->line_edge_softness_m = 0.006f;
     env->line_edge_softness_jitter_m = 0.004f;
     env->episode_line_width_m = env->line_width_m;
@@ -302,6 +309,8 @@ void init(LineFollow* env) {
     env->negative_action_steps = 0;
     env->episode_return = 0.0f;
     env->episode_progress = 0.0f;
+    env->effective_progress_m = 0.0f;
+    env->center_path_m = 0.0f;
     env->last_progress = 0.0f;
     env->centerline_reward_progress_m = 0.0f;
     env->perf_quality_sum = 0.0f;
@@ -407,9 +416,9 @@ static inline int perf_target_checkpoints(LineFollow* env) {
 }
 
 static inline float episode_progress_frac(LineFollow* env) {
-    int target_checkpoints = perf_target_checkpoints(env);
-    return target_checkpoints > 0
-        ? clampf((float)env->perf_checkpoint_count / (float)target_checkpoints, 0.0f, 1.0f)
+    float target = perf_target_progress_m(env);
+    return target > 1e-6f
+        ? clampf(env->episode_progress / target, 0.0f, 1.0f)
         : 0.0f;
 }
 
@@ -420,9 +429,9 @@ static inline float episode_checkpoint_accuracy(LineFollow* env) {
 }
 
 static inline float episode_perf_score(LineFollow* env) {
-    int target_checkpoints = perf_target_checkpoints(env);
-    return target_checkpoints > 0
-        ? clampf(env->perf_quality_sum / (float)target_checkpoints, 0.0f, 1.0f)
+    float target = perf_target_progress_m(env);
+    return target > 1e-6f
+        ? clampf(env->effective_progress_m / target, 0.0f, 1.0f)
         : 0.0f;
 }
 
@@ -438,6 +447,9 @@ void add_log(LineFollow* env) {
     float progress_frac = episode_progress_frac(env);
     float checkpoint_accuracy = episode_checkpoint_accuracy(env);
     float perf = episode_perf_score(env);
+    float path_efficiency = env->center_path_m > 1e-6f
+        ? clampf(env->episode_progress / env->center_path_m, 0.0f, 1.0f)
+        : 0.0f;
     float avg_forward_speed = episode_length > 0.0f
         ? env->forward_speed_sum / episode_length
         : 0.0f;
@@ -465,6 +477,9 @@ void add_log(LineFollow* env) {
     env->log.progress_frac += progress_frac;
     env->log.distance_progress_frac += distance_progress_frac;
     env->log.progress_m += env->episode_progress;
+    env->log.effective_progress_m += env->effective_progress_m;
+    env->log.center_path_m += env->center_path_m;
+    env->log.path_efficiency += path_efficiency;
     env->log.episode_return += env->episode_return;
     env->log.episode_length += episode_length;
     env->log.centerline_error += mean_error;
@@ -607,6 +622,20 @@ static inline void randomize_episode_params(LineFollow* env) {
         env->episode_line_edge_softness_m, 0.75f * env->episode_line_width_m);
 }
 
+static inline void jitter_episode_track_line_widths(LineFollow* env) {
+    if (env->line_width_segment_jitter_m <= 0.0f) {
+        return;
+    }
+
+    float offset = env->line_width_segment_jitter_m * rand_signed(&env->rng);
+    for (int i = 0; i < env->track.sample_count; i++) {
+        float target = env->line_width_segment_jitter_m * rand_signed(&env->rng);
+        offset = 0.65f * offset + 0.35f * target;
+        env->track.samples[i].line_width_m = fmaxf(
+            0.004f, env->episode_line_width_m + offset);
+    }
+}
+
 static inline void sensor_layout(LineFollow* env) {
     const float lateral[LINE_FOLLOW_SENSOR_COUNT] = {
         env->sensor_side_lateral_m,
@@ -679,12 +708,18 @@ static inline void record_trajectory(LineFollow* env) {
     env->trajectory_y[LINE_FOLLOW_TRAJECTORY_CAP - 1] = env->robot_y;
 }
 
-float centerline_progress_reward(LineFollow* env, float progress_delta,
+float record_progress_metrics(LineFollow* env, float progress_delta,
         float centerline_error) {
-    if (progress_delta <= 0.0f || env->centerline_reward_interval_m <= 1e-6f) {
+    if (progress_delta <= 0.0f) {
         return 0.0f;
     }
 
+    float accuracy = accuracy_score(env, centerline_error);
+    env->effective_progress_m += progress_delta * accuracy;
+
+    if (env->centerline_reward_interval_m <= 1e-6f) {
+        return 0.0f;
+    }
     env->centerline_reward_progress_m += progress_delta;
     int intervals = (int)(env->centerline_reward_progress_m / env->centerline_reward_interval_m);
     if (intervals <= 0) {
@@ -692,10 +727,9 @@ float centerline_progress_reward(LineFollow* env, float progress_delta,
     }
 
     env->centerline_reward_progress_m -= (float)intervals * env->centerline_reward_interval_m;
-    float accuracy = accuracy_score(env, centerline_error);
     env->perf_quality_sum += (float)intervals * accuracy;
     env->perf_checkpoint_count += intervals;
-    return (float)intervals * reward_centerline_score(env, centerline_error);
+    return 0.0f;
 }
 
 float compute_reward(LineFollow* env, float progress_delta, float centerline_error,
@@ -703,13 +737,13 @@ float compute_reward(LineFollow* env, float progress_delta, float centerline_err
         float centerline_milestone_reward, float signed_turn, bool idle,
         float negative_action_amount, float action_bound_violation) {
     (void)action_delta;
+    (void)centerline_milestone_reward;
     float reward = 0.0f;
     if (progress_delta != 0.0f) {
         float progress_score = progress_fraction_score(env, progress_delta);
         float centerline_score = reward_centerline_score(env, centerline_error);
         reward += env->progress_reward_scale * progress_score * centerline_score;
     }
-    reward += checkpoint_reward_scale(env) * centerline_milestone_reward;
     if (env->steering_correction_scale > 0.0f
             && fabsf(centerline_error) > 0.001f) {
         float correction_need = clampf(
@@ -776,6 +810,7 @@ bool line_visible_to_sensor_array(LineFollow* env) {
     };
     float min_lateral = 1e9f;
     float max_lateral = -1e9f;
+    float max_edge = 0.0f;
     for (int i = 0; i < LINE_FOLLOW_OBS_SIZE; i++) {
         int sensor_idx = active_sensors[i];
         LineFollowNearest nearest = nearest_track(
@@ -786,25 +821,36 @@ bool line_visible_to_sensor_array(LineFollow* env) {
         if (nearest.signed_lateral_m > max_lateral) {
             max_lateral = nearest.signed_lateral_m;
         }
+        float edge = 0.5f * nearest.line_width_m + env->episode_line_edge_softness_m;
+        if (edge > max_edge) {
+            max_edge = edge;
+        }
     }
-
-    float edge = 0.5f * env->episode_line_width_m + env->episode_line_edge_softness_m;
-    return min_lateral <= edge && max_lateral >= -edge;
+    return min_lateral <= max_edge && max_lateral >= -max_edge;
 }
 
 static inline bool generate_episode_track(LineFollow* env) {
     for (int i = 0; i < env->max_track_gen_attempts; i++) {
         if (generate_track(&env->track, &env->rng, env->track_family,
                 env->episode_line_width_m, env->track_bounds_m)) {
+            jitter_episode_track_line_widths(env);
             return true;
         }
     }
     if (env->track_family == LINE_FOLLOW_TRACK_RANDOM) {
-        return generate_s_curve(&env->track, 0.36f, 0.04f,
+        bool ok = generate_s_curve(&env->track, 0.36f, 0.04f,
             env->episode_line_width_m, env->track_bounds_m);
+        if (ok) {
+            jitter_episode_track_line_widths(env);
+        }
+        return ok;
     }
-    return generate_straight(&env->track, env->track_bounds_m * 1.2f,
+    bool ok = generate_straight(&env->track, env->track_bounds_m * 1.2f,
         env->episode_line_width_m, env->track_bounds_m);
+    if (ok) {
+        jitter_episode_track_line_widths(env);
+    }
+    return ok;
 }
 
 void c_reset(LineFollow* env) {
@@ -814,6 +860,8 @@ void c_reset(LineFollow* env) {
     env->negative_action_steps = 0;
     env->episode_return = 0.0f;
     env->episode_progress = 0.0f;
+    env->effective_progress_m = 0.0f;
+    env->center_path_m = 0.0f;
     env->centerline_reward_progress_m = 0.0f;
     env->perf_quality_sum = 0.0f;
     env->perf_checkpoint_count = 0;
@@ -904,10 +952,15 @@ void c_step(LineFollow* env) {
     env->forward_speed_sum += forward_speed;
     env->speed_frac_sum += clampf(forward_speed / fmaxf(env->max_wheel_speed_mps, 1e-6f),
         0.0f, 1.0f);
+    float prev_x = env->robot_x;
+    float prev_y = env->robot_y;
     env->robot_x += forward_speed * cosf(env->robot_theta) * dt;
     env->robot_y += forward_speed * sinf(env->robot_theta) * dt;
     env->robot_theta += omega * dt;
     env->robot_theta = angle_diff(env->robot_theta, 0.0f);
+    float dx = env->robot_x - prev_x;
+    float dy = env->robot_y - prev_y;
+    env->center_path_m += sqrtf(dx * dx + dy * dy);
 
     env->tick += 1;
     compute_observations(env);
@@ -953,7 +1006,7 @@ void c_step(LineFollow* env) {
     if (idle) {
         env->idle_steps += 1;
     }
-    float centerline_milestone_reward = centerline_progress_reward(
+    float centerline_milestone_reward = record_progress_metrics(
         env, progress_delta, env->centerline_error);
 
     float reward = compute_reward(env, progress_delta, env->centerline_error,
@@ -1070,7 +1123,15 @@ void c_render(LineFollow* env) {
             env->track.samples[i].x, env->track.samples[i].y, width, height, scale);
         Vector2 b = world_to_screen(env,
             env->track.samples[i + 1].x, env->track.samples[i + 1].y, width, height, scale);
-        DrawLineEx(a, b, fmaxf(2.0f, env->track.samples[i].line_width_m * scale), BLACK);
+        float line_width = 0.5f * (
+            env->track.samples[i].line_width_m
+            + env->track.samples[i + 1].line_width_m);
+        DrawLineEx(a, b, fmaxf(2.0f, line_width * scale), BLACK);
+    }
+    for (int i = 0; i < env->track.sample_count; i++) {
+        Vector2 p = world_to_screen(env,
+            env->track.samples[i].x, env->track.samples[i].y, width, height, scale);
+        DrawCircleV(p, fmaxf(1.0f, 0.5f * env->track.samples[i].line_width_m * scale), BLACK);
     }
 
     for (int i = 1; i < env->trajectory_count; i++) {

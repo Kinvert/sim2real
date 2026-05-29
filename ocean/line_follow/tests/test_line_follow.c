@@ -156,13 +156,14 @@ static void test_measured_geometry_defaults(void) {
     expect_near(env.body_ahead_m, 0.040f, 1e-6f, "measured body ahead of axle is default");
     expect_near(env.body_behind_m, 0.090f, 1e-6f, "measured body behind axle is default");
     expect_near(env.tire_diameter_m, 0.065f, 1e-6f, "measured tire diameter is default");
-    expect_near(env.sensor_forward_m, 0.045f, 1e-6f, "measured sensor forward offset is default");
-    expect_near(env.sensor_side_lateral_m, 0.020f, 1e-6f,
-        "measured side sensor lateral offset is default");
-    expect_near(env.sensor_forward_jitter_m, 0.0025f, 1e-6f,
-        "sensor forward jitter default is two and a half millimeters");
-    expect_near(env.sensor_lateral_jitter_m, 0.0025f, 1e-6f,
-        "sensor lateral jitter default is two and a half millimeters");
+    expect_near(env.sensor_forward_m, 0.0435f, 1e-6f,
+        "measured twisted sensor forward offset is default");
+    expect_near(env.sensor_side_lateral_m, 0.018f, 1e-6f,
+        "measured twisted side sensor lateral offset is default");
+    expect_near(env.sensor_forward_jitter_m, 0.003f, 1e-6f,
+        "sensor forward jitter default covers small mounting errors");
+    expect_near(env.sensor_lateral_jitter_m, 0.004f, 1e-6f,
+        "sensor lateral jitter default covers hand-built mounting spread");
     expect_near(env.qti_white_time, 40.0f, 1e-6f,
         "nominal QTI white calibration follows real telemetry");
     expect_near(env.qti_black_time, 350.0f, 1e-6f,
@@ -171,8 +172,10 @@ static void test_measured_geometry_defaults(void) {
         "QTI white response is randomized for training");
     expect_near(env.qti_black_jitter, 120.0f, 1e-6f,
         "QTI black response is randomized for training");
-    expect_near(env.line_width_jitter_m, 0.004f, 1e-6f,
-        "line width is randomized for training");
+    expect_near(env.line_width_jitter_m, 0.006f, 1e-6f,
+        "episode line width randomization covers hand-drawn stripe thickness");
+    expect_near(env.line_width_segment_jitter_m, 0.002f, 1e-6f,
+        "per-track line width randomization covers uneven hand-drawn segments");
     expect_near(env.line_edge_softness_jitter_m, 0.004f, 1e-6f,
         "line edge softness is randomized for training");
     expect_near(env.start_lateral_offset_m, 0.025f, 1e-6f,
@@ -180,12 +183,12 @@ static void test_measured_geometry_defaults(void) {
     expect_near(env.start_heading_offset_rad, 0.261799f, 1e-6f,
         "start heading randomization covers about fifteen degrees");
 
-    expect_near(env.sensor_forward[0], 0.045f, 1e-6f, "left sensor forward default");
-    expect_near(env.sensor_lateral[0], 0.020f, 1e-6f, "left sensor lateral default");
-    expect_near(env.sensor_forward[1], 0.045f, 1e-6f, "middle sensor forward default");
+    expect_near(env.sensor_forward[0], 0.0435f, 1e-6f, "left sensor forward default");
+    expect_near(env.sensor_lateral[0], 0.018f, 1e-6f, "left sensor lateral default");
+    expect_near(env.sensor_forward[1], 0.0435f, 1e-6f, "middle sensor forward default");
     expect_near(env.sensor_lateral[1], 0.0f, 1e-6f, "middle sensor lateral default");
-    expect_near(env.sensor_forward[2], 0.045f, 1e-6f, "right sensor forward default");
-    expect_near(env.sensor_lateral[2], -0.020f, 1e-6f, "right sensor lateral default");
+    expect_near(env.sensor_forward[2], 0.0435f, 1e-6f, "right sensor forward default");
+    expect_near(env.sensor_lateral[2], -0.018f, 1e-6f, "right sensor lateral default");
 }
 
 static void test_episode_dt_randomization(void) {
@@ -380,6 +383,8 @@ static void test_perf_penalizes_centerline_error(void) {
 
     env.tick = 10;
     env.episode_progress = perf_target_progress_m(&env);
+    env.effective_progress_m = env.episode_progress;
+    env.center_path_m = env.episode_progress;
     int target_checkpoints = perf_target_checkpoints(&env);
     env.perf_quality_sum = (float)target_checkpoints;
     env.perf_checkpoint_count = target_checkpoints;
@@ -387,11 +392,11 @@ static void test_perf_penalizes_centerline_error(void) {
     env.centerline_error_sum = 0.0f;
     add_log(&env);
     expect_near(env.log.perf, 1.0f, 1e-6f,
-        "all checkpoint qualities at one gives full perf");
+        "full accuracy-weighted progress gives full perf");
     expect_near(env.log.score, 0.0f, 1e-6f,
         "score logs raw episode return separately from perf");
     expect_near(env.log.progress_frac, 1.0f, 1e-6f,
-        "all target checkpoints reached logs full progress fraction");
+        "full target progress logs full progress fraction");
     expect_near(env.log.distance_progress_frac, 1.0f, 1e-6f,
         "full target distance logs full distance progress fraction");
     expect_near(env.log.checkpoint_accuracy, 1.0f, 1e-6f,
@@ -402,20 +407,28 @@ static void test_perf_penalizes_centerline_error(void) {
         "target checkpoint count is logged");
     expect_near(env.log.progress_m, env.episode_progress, 1e-6f,
         "raw progress meters are still logged");
+    expect_near(env.log.effective_progress_m, env.effective_progress_m, 1e-6f,
+        "accuracy-weighted progress meters are logged");
+    expect_near(env.log.center_path_m, env.center_path_m, 1e-6f,
+        "axle-center path meters are logged");
+    expect_near(env.log.path_efficiency, 1.0f, 1e-6f,
+        "centered straight progress has full path efficiency");
 
     memset(&env.log, 0, sizeof(env.log));
     env.tick = 10;
     env.episode_progress = perf_target_progress_m(&env);
-    env.perf_quality_sum = 0.0f;
+    env.effective_progress_m = 0.0f;
+    env.center_path_m = env.episode_progress;
+    env.perf_quality_sum = (float)target_checkpoints;
     env.perf_checkpoint_count = target_checkpoints;
     env.centerline_error = 2.0f * env.sensor_side_lateral_m;
     env.centerline_error_sum = 2.0f * env.sensor_side_lateral_m * 10.0f;
     add_log(&env);
     expect_near(env.log.perf, 0.0f, 1e-6f,
-        "zero checkpoint qualities gives zero perf even with full progress");
+        "zero effective progress gives zero perf even with full raw progress");
 }
 
-static void test_perf_checkpoint_quality(void) {
+static void test_continuous_progress_quality(void) {
     float obs[LINE_FOLLOW_OBS_SIZE] = {0};
     float actions[2] = {0};
     float rewards[1] = {0};
@@ -442,24 +455,31 @@ static void test_perf_checkpoint_quality(void) {
     expect_near(reward_centerline_score(&env, 0.030f), -1.0f, 1e-6f,
         "reward centerline score is minus one at thirty millimeters");
 
-    float first = centerline_progress_reward(&env, 0.010f, 0.0f);
-    expect_true(first > 0.0f, "first checkpoint can pay reward");
+    float first = record_progress_metrics(&env, 0.010f, 0.0f);
+    expect_near(first, 0.0f, 1e-6f,
+        "progress metric recording no longer emits checkpoint reward");
+    expect_near(env.effective_progress_m, 0.010f, 1e-6f,
+        "centered progress adds full effective progress");
     expect_near(env.perf_quality_sum, 1.0f, 1e-6f,
-        "centered checkpoint adds full perf quality");
+        "centered checkpoint debug adds full perf quality");
     expect_true(env.perf_checkpoint_count == 1,
-        "centered checkpoint increments perf checkpoint count");
+        "centered checkpoint debug increments perf checkpoint count");
 
-    centerline_progress_reward(&env, 0.010f, 0.020f);
+    record_progress_metrics(&env, 0.010f, 0.020f);
+    expect_near(env.effective_progress_m, 0.010f + 0.010f / 3.0f, 1e-6f,
+        "off-center progress adds linearly reduced effective progress");
     expect_near(env.perf_quality_sum, 4.0f / 3.0f, 1e-6f,
-        "twenty millimeter checkpoint adds its linear perf quality");
+        "twenty millimeter checkpoint debug adds its linear perf quality");
     expect_true(env.perf_checkpoint_count == 2,
-        "second checkpoint increments perf checkpoint count");
+        "second checkpoint debug increments perf checkpoint count");
 
-    float far_training_reward = centerline_progress_reward(&env, 0.010f, 0.060f);
-    expect_true(far_training_reward < 0.0f,
-        "far off-center checkpoints produce negative training reward");
+    float far_training_reward = record_progress_metrics(&env, 0.010f, 0.060f);
+    expect_near(far_training_reward, 0.0f, 1e-6f,
+        "far off-center progress metric does not emit training reward");
     expect_near(env.perf_quality_sum, 4.0f / 3.0f, 1e-6f,
-        "negative training checkpoints do not reduce bounded perf quality below zero");
+        "far checkpoints do not reduce bounded debug quality below zero");
+    expect_near(env.effective_progress_m, 0.010f + 0.010f / 3.0f, 1e-6f,
+        "far progress adds no effective progress");
 }
 
 static void test_progress_rejects_discontinuous_nearest_jump(void) {
@@ -478,26 +498,28 @@ static void test_progress_rejects_discontinuous_nearest_jump(void) {
     }
 }
 
-static void test_centerline_milestone_and_motion_rewards(void) {
+static void test_continuous_progress_and_motion_rewards(void) {
     float obs[LINE_FOLLOW_OBS_SIZE] = {0};
     float actions[2] = {0};
     float rewards[1] = {0};
     float terminals[1] = {0};
     LineFollow env = make_test_env(obs, actions, rewards, terminals);
 
-    float first = centerline_progress_reward(&env, 0.009f, 0.0f);
+    float first = record_progress_metrics(&env, 0.009f, 0.0f);
     expect_near(first, 0.0f, 1e-6f,
-        "centerline bonus does not pay before ten millimeters");
-    float second = centerline_progress_reward(&env, 0.001f, 0.0f);
-    expect_near(second, 1.0f, 1e-6f,
-        "centerline bonus pays when cumulative progress reaches ten millimeters");
+        "progress metric recording does not emit milestone reward");
+    float second = record_progress_metrics(&env, 0.001f, 0.0f);
+    expect_near(second, 0.0f, 1e-6f,
+        "progress metric recording stays reward-free at ten millimeters");
     expect_near(env.centerline_reward_progress_m, 0.0f, 1e-6f,
-        "centerline bonus accumulator subtracts paid interval");
+        "checkpoint debug accumulator subtracts counted interval");
+    expect_near(env.effective_progress_m, 0.010f, 1e-6f,
+        "continuous effective progress tracks every millimeter");
 
-    float near_bonus = centerline_progress_reward(&env, 0.010f, 0.0f);
-    float far_bonus = centerline_progress_reward(&env, 0.010f, 2.0f * env.sensor_side_lateral_m);
-    expect_true(near_bonus > far_bonus,
-        "centerline milestone reward is higher near the centerline");
+    float before_far = env.effective_progress_m;
+    record_progress_metrics(&env, 0.010f, 2.0f * env.sensor_side_lateral_m);
+    expect_near(env.effective_progress_m, before_far, 1e-6f,
+        "far-off progress adds no effective progress");
 
     float stopped = compute_reward(&env, 0.0f, 0.0f, 0.0f, true, 0.0f,
         0.0f, 0.0f, 0.0f, true, 0.0f, 0.0f);
@@ -525,18 +547,16 @@ static void test_centerline_milestone_and_motion_rewards(void) {
     expect_near(pre_checkpoint, 0.5f * env.progress_reward_scale - env.time_penalty, 1e-6f,
         "forward progress receives normalized dense reward before a checkpoint");
 
-    float checkpoint_centered = compute_reward(&env, full_tick_progress, 0.0f, 0.0f, true, 0.1f,
+    float full_progress_centered = compute_reward(&env, full_tick_progress, 0.0f, 0.0f, true, 0.1f,
         0.0f, reward_centerline_score(&env, 0.0f), 0.0f, false, 0.0f, 0.0f);
-    float checkpoint_off_center = compute_reward(&env, full_tick_progress, 0.020f, 0.0f, true, 0.1f,
+    float full_progress_off_center = compute_reward(&env, full_tick_progress, 0.020f, 0.0f, true, 0.1f,
         0.0f, reward_centerline_score(&env, 0.020f), 0.0f, false, 0.0f, 0.0f);
-    expect_true(checkpoint_centered > checkpoint_off_center,
-        "checkpoint progress reward is scaled by centerline accuracy");
-    expect_near(checkpoint_centered,
-        env.progress_reward_scale
-            + checkpoint_reward_scale(&env) * reward_centerline_score(&env, 0.0f)
-            - env.time_penalty,
+    expect_true(full_progress_centered > full_progress_off_center,
+        "continuous progress reward is scaled by centerline quality");
+    expect_near(full_progress_centered,
+        env.progress_reward_scale - env.time_penalty,
         1e-6f,
-        "checkpoint reward scale stays separate from normalized tick progress reward");
+        "full-tick centered reward is normalized progress minus time penalty");
 
     float bounded = compute_reward(&env, 0.0f, 0.0f, 0.0f, true, 0.1f,
         0.0f, 0.0f, 0.0f, false, 0.0f, 0.0f);
@@ -695,6 +715,8 @@ static void reset_centered_straight_episode(LineFollow* env) {
     env->idle_steps = 0;
     env->episode_return = 0.0f;
     env->episode_progress = 0.0f;
+    env->effective_progress_m = 0.0f;
+    env->center_path_m = 0.0f;
     env->last_progress = 0.0f;
     env->centerline_reward_progress_m = 0.0f;
     env->perf_quality_sum = 0.0f;
@@ -839,6 +861,7 @@ static void test_randomized_sensor_response_clamps_observations(void) {
     env.qti_black_jitter = 3000.0f;
     env.sensor_noise_std = 2000.0f;
     env.line_width_jitter_m = 0.010f;
+    env.line_width_segment_jitter_m = 0.010f;
     env.line_edge_softness_jitter_m = 0.010f;
 
     for (int episode = 0; episode < 32; episode++) {
@@ -855,6 +878,10 @@ static void test_randomized_sensor_response_clamps_observations(void) {
         }
         expect_true(env.episode_line_width_m >= 0.004f,
             "randomized line width stays positive");
+        for (int i = 0; i < env.track.sample_count; i++) {
+            expect_true(env.track.samples[i].line_width_m >= 0.004f,
+                "randomized per-segment line width stays positive");
+        }
         expect_true(env.episode_line_edge_softness_m >= 0.001f,
             "randomized line edge softness stays positive");
         actions[0] = rand_signed(&env.rng);
@@ -871,6 +898,35 @@ static void test_randomized_sensor_response_clamps_observations(void) {
     }
 }
 
+static void test_segment_line_width_jitter_varies_track_samples(void) {
+    float obs[LINE_FOLLOW_OBS_SIZE] = {0};
+    float actions[2] = {0};
+    float rewards[1] = {0};
+    float terminals[1] = {0};
+    LineFollow env = make_test_env(obs, actions, rewards, terminals);
+
+    env.rng = 123u;
+    env.track_family = LINE_FOLLOW_TRACK_S_CURVE;
+    env.line_width_jitter_m = 0.0f;
+    env.line_width_segment_jitter_m = 0.002f;
+    c_reset(&env);
+
+    float min_width = 1e9f;
+    float max_width = -1e9f;
+    for (int i = 0; i < env.track.sample_count; i++) {
+        float width = env.track.samples[i].line_width_m;
+        if (width < min_width) min_width = width;
+        if (width > max_width) max_width = width;
+    }
+
+    expect_true(max_width - min_width > 0.0001f,
+        "per-segment width jitter changes line thickness inside an episode");
+    expect_true(min_width >= env.line_width_m - env.line_width_segment_jitter_m - 1e-6f,
+        "per-segment width jitter respects the lower configured range");
+    expect_true(max_width <= env.line_width_m + env.line_width_segment_jitter_m + 1e-6f,
+        "per-segment width jitter respects the upper configured range");
+}
+
 int main(void) {
     test_qti_normalization();
     test_propeller_qti_normalization_parity();
@@ -882,9 +938,9 @@ int main(void) {
     test_track_generation();
     test_episode_progress_starts_at_zero();
     test_perf_penalizes_centerline_error();
-    test_perf_checkpoint_quality();
+    test_continuous_progress_quality();
     test_progress_rejects_discontinuous_nearest_jump();
-    test_centerline_milestone_and_motion_rewards();
+    test_continuous_progress_and_motion_rewards();
     test_sensor_and_reward_behavior();
     test_negative_wheel_command_is_penalized_without_terminal();
     test_raw_action_out_of_bounds_is_soft_penalized();
@@ -892,6 +948,7 @@ int main(void) {
     test_off_track_terminal_penalty();
     test_reward_clamp_and_reset_start_visibility();
     test_randomized_sensor_response_clamps_observations();
+    test_segment_line_width_jitter_varies_track_samples();
 
     if (failures > 0) {
         fprintf(stderr, "%d line_follow test failures\n", failures);

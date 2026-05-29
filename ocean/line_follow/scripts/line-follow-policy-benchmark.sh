@@ -17,6 +17,13 @@ if [[ -z "$weights" || ! -f "$weights" ]]; then
   echo "No line_follow checkpoint found. Set LINE_FOLLOW_WEIGHTS=/path/to/checkpoint.bin" >&2
   exit 1
 fi
+weights="$(realpath "$weights")"
+run_id="$(basename "$(dirname "$weights")")"
+training_log="$ROOT/logs/line_follow/$run_id.json"
+extra_args=()
+if [[ -f "$training_log" ]]; then
+  extra_args=(--training-log "$(realpath "$training_log")")
+fi
 
 cc=${CC:-clang}
 "$cc" -std=gnu99 -Wall -Wextra -Werror -Wno-unused-parameter \
@@ -24,4 +31,4 @@ cc=${CC:-clang}
   -DNUM_LAYERS="${LINE_FOLLOW_NUM_LAYERS:-$LINE_FOLLOW_NUM_LAYERS_DEFAULT}" \
   -I"$ROOT" "$SRC" -lm -o "$OUT"
 
-exec "$OUT" "$weights" "$@"
+exec "$OUT" "$weights" "${extra_args[@]}" "$@"

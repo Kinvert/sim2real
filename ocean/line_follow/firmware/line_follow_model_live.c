@@ -72,7 +72,9 @@
 #ifndef MAX_WHEEL_SPEED_MPS
 #define MAX_WHEEL_SPEED_MPS 0.116f
 #endif
+#ifndef COMMAND_DEADBAND
 #define COMMAND_DEADBAND 0.04f
+#endif
 #define TIRE_DIAMETER_M 0.065f
 #define TICKS_PER_REV 64.0f
 #define LINE_FOLLOW_PI 3.14159265358979323846f
@@ -328,10 +330,11 @@ int main(void)
   print("hidden_size=%d num_layers=%d\n", HIDDEN_SIZE, NUM_LAYERS);
   print("pins left=%d middle=%d right=%d\n",
       QTI_LEFT_PIN, QTI_MIDDLE_PIN, QTI_RIGHT_PIN);
-  print("cal white=%d black=%d threshold_q1000=%d loop_ms=%d max_loops=%d print_every=%d max_speed_mm_s=%d\n",
+  print("cal white=%d black=%d threshold_q1000=%d loop_ms=%d max_loops=%d print_every=%d max_speed_mm_s=%d deadband_q1000=%d\n",
       QTI_WHITE_TIME, QTI_BLACK_TIME, QTI_THRESHOLD_Q1000,
       LINE_FOLLOW_LOOP_MS, LINE_FOLLOW_MAX_LOOPS, LINE_FOLLOW_PRINT_EVERY,
-      (int)(MAX_WHEEL_SPEED_MPS * 1000.0f + 0.5f));
+      (int)(MAX_WHEEL_SPEED_MPS * 1000.0f + 0.5f),
+      (int)(COMMAND_DEADBAND * 1000.0f + 0.5f));
   print("clock clkfreq=%d ms_ticks=%d\n", CLKFREQ, ms);
   print("NOTE lower raw should be brighter/whiter, higher raw should be darker/blacker\n");
   print("model observations are left, middle, right; pin 4 is ignored\n");
