@@ -83,24 +83,24 @@ static void test_continuous_actions(void) {
 
     float tiny[2] = {0.02f, -0.04f};
     cmd = map_actions(tiny, 0.5f, 0.05f, 1.0f, 1.0f);
-    expect_near(cmd.left_mps, 0.255f, 1e-6f, "near-zero left action maps near half speed");
-    expect_near(cmd.right_mps, 0.24f, 1e-6f, "near-zero right action maps near half speed");
+    expect_near(cmd.left_mps, 0.0f, 1e-6f, "near-zero left action maps to stopped wheel");
+    expect_near(cmd.right_mps, 0.0f, 1e-6f, "negative near-zero right action maps to stopped wheel");
 
     float stop[2] = {-0.96f, -0.88f};
     cmd = map_actions(stop, 0.5f, 0.05f, 1.0f, 1.0f);
-    expect_near(cmd.left_mps, 0.0f, 1e-6f, "left stop deadband maps near-minus-one command to zero");
-    expect_near(cmd.right_mps, 0.030f, 1e-6f,
-        "right command just outside stop deadband maps to slow wheel speed");
+    expect_near(cmd.left_mps, 0.0f, 1e-6f, "left negative command maps to zero");
+    expect_near(cmd.right_mps, 0.0f, 1e-6f,
+        "right negative command maps to zero");
 
     float polarity[2] = {1.0f, -1.0f};
     cmd = map_actions(polarity, 0.35f, 0.0f, 1.0f, 1.0f);
     expect_near(cmd.left_mps, 0.35f, 1e-6f, "positive left command drives left wheel forward");
     expect_near(cmd.right_action, -1.0f, 1e-6f, "minus-one right command keeps signed normalized action");
     expect_near(cmd.right_mps, 0.0f, 1e-6f, "minus-one right command maps to stopped wheel speed");
-    expect_near(raw_action_from_command(0.0f), -1.0f, 1e-6f,
-        "zero wheel command maps to minus-one policy action");
-    expect_near(raw_action_from_command(0.5f), 0.0f, 1e-6f,
-        "half wheel command maps to zero policy action");
+    expect_near(raw_action_from_command(0.0f), 0.0f, 1e-6f,
+        "zero wheel command maps to zero policy action");
+    expect_near(raw_action_from_command(0.5f), 0.5f, 1e-6f,
+        "half wheel command maps to half policy action");
     expect_near(raw_action_from_command(1.0f), 1.0f, 1e-6f,
         "full wheel command maps to plus-one policy action");
 }
@@ -140,8 +140,8 @@ static void test_measured_geometry_defaults(void) {
         "per-tick time penalty discourages crawling or stopping");
     expect_near(env.idle_penalty, 0.02f, 1e-6f,
         "idle wheel penalty prevents centered stop reward hacking");
-    expect_near(env.min_wheel_action, 0.08f, 1e-6f,
-        "idle threshold requires at least one wheel command above a small action");
+    expect_near(env.min_wheel_action, 0.25f, 1e-6f,
+        "idle threshold requires average wheel command above a quarter of max speed");
     expect_near(env.track_complete_margin_m, 0.02f, 1e-6f,
         "completion margin is scaled for paper-sized tracks");
     expect_near(env.wheel_base_m, 0.125f, 1e-6f, "measured tire-to-tire width is default wheel base");
@@ -615,23 +615,23 @@ static void test_negative_wheel_command_is_penalized_without_terminal(void) {
 
     c_step(&env);
 
-    expect_true(env.v_left_cmd > 0.0f,
-        "negative normalized left action maps to a slow forward wheel in sim");
+    expect_near(env.v_left_cmd, 0.0f, 1e-6f,
+        "negative normalized left action maps to a stopped wheel in sim");
     expect_true(env.v_right_cmd > env.v_left_cmd,
         "positive normalized right action maps faster than the left wheel");
     expect_near(terminals[0], 0.0f, 1e-6f,
         "negative wheel command is no longer an immediate terminal");
     expect_near(env.log.n, 0.0f, 1e-6f,
         "negative wheel command does not log a terminal episode by itself");
-    expect_true(env.negative_action_steps == 0,
-        "negative normalized action is no longer counted as physical reverse");
+    expect_true(env.negative_action_steps == 1,
+        "negative normalized action is logged and penalized without forcing a terminal");
     expect_true(rewards[0] >= -1.0f && rewards[0] <= 1.0f,
         "slow wheel command receives a finite clamped dense reward");
 }
 
 static void reset_centered_straight_episode(LineFollow* env);
 
-static void test_raw_action_out_of_bounds_is_terminal(void) {
+static void test_raw_action_out_of_bounds_is_soft_penalized(void) {
     float obs[LINE_FOLLOW_OBS_SIZE] = {0};
     float actions[2] = {1.01f, 1.01f};
     float rewards[1] = {0};
@@ -641,18 +641,18 @@ static void test_raw_action_out_of_bounds_is_terminal(void) {
 
     c_step(&env);
 
-    expect_near(actions[0], 1.01f, 1e-6f,
-        "raw action above upper bound is not silently clamped before terminal");
-    expect_near(actions[1], 1.01f, 1e-6f,
-        "second raw action above upper bound is not silently clamped before terminal");
-    expect_near(terminals[0], 1.0f, 1e-6f,
-        "raw action above upper bound is an immediate terminal");
-    expect_near(rewards[0], -1.0f, 1e-6f,
-        "raw action above upper bound receives the hard action-contract penalty");
-    expect_near(env.log.n, 1.0f, 1e-6f,
-        "raw action upper bound violation logs a terminal episode");
-    expect_near(env.log.terminal_action_bound, 1.0f, 1e-6f,
-        "raw action upper bound violation is logged");
+    expect_near(actions[0], 1.0f, 1e-6f,
+        "raw action above upper bound is clamped for downstream env state");
+    expect_near(actions[1], 1.0f, 1e-6f,
+        "second raw action above upper bound is clamped for downstream env state");
+    expect_near(terminals[0], 0.0f, 1e-6f,
+        "raw action above upper bound is clipped and does not terminal");
+    expect_true(rewards[0] >= -1.0f && rewards[0] <= 1.0f,
+        "raw action above upper bound receives a finite clipped reward");
+    expect_near(env.log.n, 0.0f, 1e-6f,
+        "raw action upper bound violation does not log a terminal episode");
+    expect_true(env.action_bound_violation_sum > 0.0f,
+        "raw action upper bound violation is accumulated for logging");
     expect_near(env.log.terminal_negative, 0.0f, 1e-6f,
         "raw action upper bound violation is not logged as a negative-action terminal");
 
@@ -665,16 +665,16 @@ static void test_raw_action_out_of_bounds_is_terminal(void) {
 
     c_step(&env);
 
-    expect_near(actions[1], -1.01f, 1e-6f,
-        "raw action below lower bound is not silently clamped before terminal");
-    expect_near(terminals[0], 1.0f, 1e-6f,
-        "raw action below lower bound is an immediate terminal");
-    expect_near(rewards[0], -1.0f, 1e-6f,
-        "raw action below lower bound receives the hard action-contract penalty");
-    expect_near(env.log.n, 1.0f, 1e-6f,
-        "raw action lower bound violation logs a terminal episode");
-    expect_near(env.log.terminal_action_bound, 1.0f, 1e-6f,
-        "raw action lower bound violation is logged");
+    expect_near(actions[1], -1.0f, 1e-6f,
+        "raw action below lower bound is clamped for downstream env state");
+    expect_near(terminals[0], 0.0f, 1e-6f,
+        "raw action below lower bound is clipped and does not terminal");
+    expect_true(rewards[0] >= -1.0f && rewards[0] <= 1.0f,
+        "raw action below lower bound receives a finite clipped reward");
+    expect_near(env.log.n, 0.0f, 1e-6f,
+        "raw action lower bound violation does not log a terminal episode");
+    expect_true(env.action_bound_violation_sum > 0.0f,
+        "raw action lower bound violation is accumulated for logging");
     expect_near(env.log.terminal_negative, 0.0f, 1e-6f,
         "raw action lower bound violation is not logged as a negative-action terminal");
 }
@@ -881,7 +881,7 @@ int main(void) {
     test_centerline_milestone_and_motion_rewards();
     test_sensor_and_reward_behavior();
     test_negative_wheel_command_is_penalized_without_terminal();
-    test_raw_action_out_of_bounds_is_terminal();
+    test_raw_action_out_of_bounds_is_soft_penalized();
     test_timeout_success_reward_requires_progress();
     test_off_track_terminal_penalty();
     test_reward_clamp_and_reset_start_visibility();

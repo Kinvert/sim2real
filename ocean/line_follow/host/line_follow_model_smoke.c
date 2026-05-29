@@ -37,7 +37,7 @@ static float bounded_policy_action(float raw_action) {
 
 static float command_to_mps(float action) {
     float clipped = clampf_local(action, -1.0f, 1.0f);
-    float unit = 0.5f * (clipped + 1.0f);
+    float unit = clipped < 0.0f ? 0.0f : clipped;
     if (unit < COMMAND_DEADBAND) {
         unit = 0.0f;
     }
@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
 
     printf("weights=%s bytes=%ld floats=%d\n", weights_path,
         (long)raw_floats * (long)sizeof(float), raw_floats);
-    printf("scale: action [-1,1] -> wheel [0,%.3f] m/s -> approx [0,%.1f] ticks/s"
+    printf("scale: action <= 0 stops wheel, action 1 -> %.3f m/s -> approx %.1f ticks/s"
            " with %.0fmm tire and %.0f ticks/rev\n",
         MAX_WHEEL_SPEED_MPS,
         (MAX_WHEEL_SPEED_MPS / ((float)M_PI * TIRE_DIAMETER_M)) * TICKS_PER_REV,

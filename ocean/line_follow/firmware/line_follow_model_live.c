@@ -233,9 +233,14 @@ static void forward_model(const float obs[OBS_SIZE], float actions[NUM_ACTIONS])
 static int action_to_ticks(float action)
 {
   float clipped = clampf_model(action, -1.0f, 1.0f);
-  float unit = 0.5f * (clipped + 1.0f);
+  float unit = clipped;
   float mps;
   float ticks;
+
+  if(unit < 0.0f)
+  {
+    unit = 0.0f;
+  }
 
   if(unit < COMMAND_DEADBAND)
   {

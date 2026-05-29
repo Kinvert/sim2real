@@ -244,7 +244,7 @@ void set_defaults(LineFollow* env) {
     env->steering_correction_scale = 0.25f;
     env->time_penalty = 0.005f;
     env->idle_penalty = 0.02f;
-    env->min_wheel_action = 0.08f;
+    env->min_wheel_action = 0.25f;
     env->reverse_penalty_scale = 0.2f;
     env->too_far_m = 0.09f;
     env->track_complete_margin_m = 0.02f;
@@ -555,8 +555,7 @@ static inline float bounded_policy_action(float raw_action) {
 }
 
 static inline float raw_action_from_command(float command) {
-    float unit = clampf(command, 0.0f, 1.0f);
-    return 2.0f * unit - 1.0f;
+    return clampf(command, 0.0f, 1.0f);
 }
 
 LineFollowWheelCommand map_actions(float* actions, float max_wheel_speed_mps,
@@ -567,8 +566,8 @@ LineFollowWheelCommand map_actions(float* actions, float max_wheel_speed_mps,
 
     cmd.left_action = actions[0];
     cmd.right_action = actions[1];
-    float left_unit = 0.5f * (cmd.left_action + 1.0f);
-    float right_unit = 0.5f * (cmd.right_action + 1.0f);
+    float left_unit = clampf(cmd.left_action, 0.0f, 1.0f);
+    float right_unit = clampf(cmd.right_action, 0.0f, 1.0f);
     if (left_unit < command_deadband) {
         left_unit = 0.0f;
     }
@@ -863,26 +862,17 @@ void c_step(LineFollow* env) {
         + fmaxf(fabsf(raw_right_action) - 1.0f, 0.0f);
     env->action_bound_violation_sum += action_bound_violation;
     env->raw_action_abs_sum += 0.5f * (fabsf(raw_left_action) + fabsf(raw_right_action));
-    if (action_bound_violation > 0.0f) {
-        env->tick += 1;
-        env->rewards[0] = -1.0f;
-        env->last_reward = -1.0f;
-        env->episode_return -= 1.0f;
-        env->terminals[0] = 1.0f;
-        clear_terminal_info(env);
-        env->terminal_action_bound = 1.0f;
-        add_log(env);
-        c_reset(env);
-        return;
-    }
-
     LineFollowWheelCommand cmd = map_actions(env->actions,
         env->max_wheel_speed_mps, env->command_deadband,
         env->left_speed_scale, env->right_speed_scale);
     env->v_left_cmd = cmd.left_mps;
     env->v_right_cmd = cmd.right_mps;
 
-    float negative_action_amount = 0.0f;
+    float negative_action_amount = fmaxf(-cmd.left_action, 0.0f)
+        + fmaxf(-cmd.right_action, 0.0f);
+    if (negative_action_amount > 0.0f) {
+        env->negative_action_steps += 1;
+    }
 
     float alpha = clampf(env->motor_lag_alpha, 0.0f, 1.0f);
     env->v_left += alpha * (env->v_left_cmd - env->v_left);
@@ -931,7 +921,8 @@ void c_step(LineFollow* env) {
     float signed_turn = clampf(
         (cmd.right_mps - cmd.left_mps) / fmaxf(env->max_wheel_speed_mps, 1e-6f),
         -1.0f, 1.0f);
-    bool idle = fmaxf(cmd.left_mps, cmd.right_mps)
+    float command_avg_mps = 0.5f * (cmd.left_mps + cmd.right_mps);
+    bool idle = command_avg_mps
         < env->min_wheel_action * fmaxf(env->max_wheel_speed_mps, 1e-6f);
     if (idle) {
         env->idle_steps += 1;

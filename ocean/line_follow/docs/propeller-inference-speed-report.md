@@ -109,7 +109,8 @@ Important details from the code:
   `NUM_LAYERS == 0`.
 - `DECODER_SIZE` is 3, but only action outputs 0 and 1 are used.
 - `action_to_ticks` clamps negative actions to zero before converting to ticks.
-- The loop always calls `pause(LINE_FOLLOW_LOOP_MS)` at the end.
+- The loop calls `pause(LINE_FOLLOW_LOOP_MS)` at the end only when the configured
+  pause is greater than zero.
 
 The ActivityBot drive library also matters:
 

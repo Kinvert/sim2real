@@ -143,9 +143,14 @@ static void forward_model(const float obs[OBS_SIZE], float actions[NUM_ACTIONS])
 static int action_to_ticks(float action)
 {
   float clipped = clampf_model(action, -1.0f, 1.0f);
-  float unit = 0.5f * (clipped + 1.0f);
+  float unit = clipped;
   float mps;
   float ticks;
+
+  if(unit < 0.0f)
+  {
+    unit = 0.0f;
+  }
 
   if(unit < COMMAND_DEADBAND)
   {
@@ -250,7 +255,7 @@ int main(void)
   print("raw_floats=%d padded_floats=%d\n",
       LINE_FOLLOW_MODEL_RAW_FLOATS, LINE_FOLLOW_MODEL_PADDED_FLOATS);
   print("hidden_size=%d num_layers=%d\n", HIDDEN_SIZE, NUM_LAYERS);
-  print("scale action[-1,1] -> wheel [0,%d] mm/s, tire=65 mm, ticks/rev=64\n",
+  print("scale action<=0 stops wheel, action=1 -> %d mm/s, tire=65 mm, ticks/rev=64\n",
       (int)(MAX_WHEEL_SPEED_MPS * 1000.0f + 0.5f));
   print("no QTI reads, no drive output, MinGRU state reset per row\n");
   print("M name left middle right action0 action1 left_ticks right_ticks\n");

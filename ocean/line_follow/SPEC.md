@@ -646,15 +646,17 @@ action[1] = right_wheel_command in [-1.0, 1.0]
 The env clamps both values to `[-1, 1]`, then maps them to wheel speeds:
 
 ```text
-left_unit   = 0.5 * (clamp(action[0], -1, 1) + 1)
-right_unit  = 0.5 * (clamp(action[1], -1, 1) + 1)
+left_unit   = max(clamp(action[0], -1, 1), 0)
+right_unit  = max(clamp(action[1], -1, 1), 0)
 v_left_cmd  = left_unit * max_wheel_speed_mps
 v_right_cmd = right_unit * max_wheel_speed_mps
 ```
 
-This branch trains non-reversing wheel commands. `action=-1` means stopped,
-`action=0` means half of the configured max speed, and `action=1` means the
-configured max speed.
+This branch trains non-reversing wheel commands. `action <= 0` means stopped,
+and `action=1` means the configured max speed. Negative actions are allowed by
+the policy interface but are clamped to a stopped wheel and penalized rather
+than used as reverse by default. The idle penalty is based on average commanded
+wheel speed, so the inside wheel may stop for sharper turns.
 
 For PufferLib/Ocean binding this should follow the existing continuous-action
 pattern used by `ocean/squared_continuous`:
@@ -696,15 +698,13 @@ recoverable.
 Per-step reward components:
 
 ```text
-+ (progress_delta / 0.025 m) * reward_centerline_score * progress_reward_scale
-+ every 25 mm of true progress: reward_centerline_score
++ normalized per-tick true progress * reward_centerline_score * progress_reward_scale
++ every 10 mm of true progress: reward_centerline_score
 - optional centerline_distance_penalty from privileged true state
 - heading_error_penalty from privileged track tangent
 - lost_line_penalty when privileged geometry says the line left the sensor span
-- action_smoothness_penalty for twitchy wheel commands
-- turn_penalty for left/right wheel command disagreement
 - time_penalty every tick to discourage crawling or stopping
-- idle_penalty when both post-deadband wheel commands are below threshold
+- idle_penalty when average post-deadband wheel command is below threshold
 - negative wheel commands clamp that wheel to stopped and receive
   reverse_penalty_scale proportional to the negative command amount
 + success_reward on timeout or track completion only if the robot stayed on
@@ -1011,11 +1011,10 @@ final `env/perf=0.297`, `env/score=0.591`, `env/episode_return=-1.300`,
 `SPS=2,129,033`. Its checkpoint is
 `checkpoints/line_follow/1779952610219/0000000199753728.bin`. Bounded
 `DISPLAY=:0` eval loaded the checkpoint successfully. Host smoke still shows
-some negative raw actions on synthetic one-hot cases, but the sim now hard
-terminates negative wheel commands with reward `-1.0`; current sim versions
-instead clamp negative wheel commands to zero speed and penalize the negative
-command amount, matching host/Propeller deployment clamps. Treat this old
-checkpoint as not drive-approved.
+some negative raw actions on synthetic one-hot cases; current sim versions
+clamp negative wheel commands to zero speed and penalize the negative command
+amount, matching host/Propeller deployment clamps. Treat this old checkpoint as
+not drive-approved.
 
 That run predates the measured three-sensor timing target. Retrain before
 treating the current `dt=0.024` / architecture sweep config as evaluated.
@@ -1037,9 +1036,9 @@ termination uses privileged simulator geometry: the true stripe must leave the
 actual sensor span, independent of noisy or thresholded sensor observations.
 The follow-up failure mode was centered stopping: a policy could park on the
 track and avoid most penalties. The reward now pays accuracy-scaled progress,
-pays accuracy-scaled 25 mm checkpoint bonuses, applies a tiny turn-command
-penalty every step, applies a time penalty every tick, and applies an idle
-penalty unless at least one wheel command is above the small motion threshold.
+pays accuracy-scaled 10 mm checkpoint bonuses, applies a time penalty every
+tick, and applies an idle penalty unless average commanded wheel speed is above
+the small motion threshold.
 Timeout/track-complete success bonuses are scaled by the same progress-times-
 accuracy `perf`, so a centered robot that has not reached checkpoints cannot
 earn a survival bonus.
@@ -1197,8 +1196,8 @@ It uses the deployment geometry/scaling assumptions:
 ```text
 action [-1, 1] -> [0, 0.038] m/s
 approximately [0, 12] ActivityBot ticks/s
-action 0.0 -> about 6 ticks/s
-action 0.5 -> about 9 ticks/s
+action 0.0 -> 0 ticks/s
+action 0.5 -> about 6 ticks/s
 action 1.0 -> about 12 ticks/s
 65 mm tire diameter
 64 encoder ticks / wheel revolution
