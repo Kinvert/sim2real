@@ -25,6 +25,7 @@ void my_init(Env* env, Dict* kwargs) {
     env->tire_width_m = dict_get(kwargs, "tire_width_m")->value;
     env->motor_lag_alpha = dict_get(kwargs, "motor_lag_alpha")->value;
     env->command_deadband = dict_get(kwargs, "command_deadband")->value;
+    env->min_drive_ticks_per_sec = dict_get(kwargs, "min_drive_ticks_per_sec")->value;
     env->left_speed_scale = dict_get(kwargs, "left_speed_scale")->value;
     env->right_speed_scale = dict_get(kwargs, "right_speed_scale")->value;
     env->lost_line_limit = dict_get(kwargs, "lost_line_limit")->value;

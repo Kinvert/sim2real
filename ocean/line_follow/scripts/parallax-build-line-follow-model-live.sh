@@ -21,7 +21,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$ENABLE_DRIVE" == "1" ]]; then
-  MAX_LOOPS="${LINE_FOLLOW_MAX_LOOPS:-400}"
+  MAX_LOOPS="${LINE_FOLLOW_MAX_LOOPS:-0}"
 else
   MAX_LOOPS="${LINE_FOLLOW_MAX_LOOPS:-0}"
 fi
@@ -59,6 +59,7 @@ args=(
   -DNUM_LAYERS="${LINE_FOLLOW_NUM_LAYERS:-$LINE_FOLLOW_NUM_LAYERS_DEFAULT}"
   -DMAX_WHEEL_SPEED_MPS="${LINE_FOLLOW_MAX_WHEEL_SPEED_MPS:-$LINE_FOLLOW_MAX_WHEEL_SPEED_MPS_DEFAULT}"
   -DCOMMAND_DEADBAND="${LINE_FOLLOW_COMMAND_DEADBAND:-$LINE_FOLLOW_COMMAND_DEADBAND_DEFAULT}"
+  -DMIN_DRIVE_TICKS_PER_SEC="${LINE_FOLLOW_MIN_DRIVE_TICKS_PER_SEC:-$LINE_FOLLOW_MIN_DRIVE_TICKS_PER_SEC_DEFAULT}"
   -DQTI_LEFT_PIN="${QTI_LEFT_PIN:-7}"
   -DQTI_MIDDLE_PIN="${QTI_MIDDLE_PIN:-6}"
   -DQTI_RIGHT_PIN="${QTI_RIGHT_PIN:-5}"
@@ -98,8 +99,13 @@ echo "Hidden size: ${LINE_FOLLOW_HIDDEN_SIZE:-$LINE_FOLLOW_HIDDEN_SIZE_DEFAULT}"
 echo "Num recurrent layers: ${LINE_FOLLOW_NUM_LAYERS:-$LINE_FOLLOW_NUM_LAYERS_DEFAULT}"
 echo "Max wheel speed: ${LINE_FOLLOW_MAX_WHEEL_SPEED_MPS:-$LINE_FOLLOW_MAX_WHEEL_SPEED_MPS_DEFAULT} m/s"
 echo "Command deadband: ${LINE_FOLLOW_COMMAND_DEADBAND:-$LINE_FOLLOW_COMMAND_DEADBAND_DEFAULT}"
+echo "Minimum drive ticks/sec: ${LINE_FOLLOW_MIN_DRIVE_TICKS_PER_SEC:-$LINE_FOLLOW_MIN_DRIVE_TICKS_PER_SEC_DEFAULT}"
 if [[ "$ENABLE_DRIVE" == "1" ]]; then
-  echo "Drive output is ENABLED for $MAX_LOOPS loops. Use only with the robot safely staged."
+  if [[ "$MAX_LOOPS" == "0" ]]; then
+    echo "Drive output is ENABLED with no loop cap. Use only with the robot safely staged."
+  else
+    echo "Drive output is ENABLED for $MAX_LOOPS loops. Use only with the robot safely staged."
+  fi
 else
   echo "Drive output is disabled. This build prints live QTI/model telemetry only."
 fi

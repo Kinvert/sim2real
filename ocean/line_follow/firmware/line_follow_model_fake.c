@@ -24,7 +24,12 @@
 #ifndef MAX_WHEEL_SPEED_MPS
 #define MAX_WHEEL_SPEED_MPS 0.116f
 #endif
+#ifndef COMMAND_DEADBAND
 #define COMMAND_DEADBAND 0.04f
+#endif
+#ifndef MIN_DRIVE_TICKS_PER_SEC
+#define MIN_DRIVE_TICKS_PER_SEC 6
+#endif
 #define TIRE_DIAMETER_M 0.065f
 #define TICKS_PER_REV 64.0f
 #define LINE_FOLLOW_PI 3.14159265358979323846f
@@ -146,6 +151,9 @@ static int action_to_ticks(float action)
   float unit = clipped;
   float mps;
   float ticks;
+  int rounded;
+  int min_ticks = MIN_DRIVE_TICKS_PER_SEC;
+  int max_ticks;
 
   if(unit < 0.0f)
   {
@@ -159,11 +167,21 @@ static int action_to_ticks(float action)
 
   mps = unit * MAX_WHEEL_SPEED_MPS;
   ticks = (mps / (LINE_FOLLOW_PI * TIRE_DIAMETER_M)) * TICKS_PER_REV;
+  max_ticks = (int)(((MAX_WHEEL_SPEED_MPS / (LINE_FOLLOW_PI * TIRE_DIAMETER_M))
+      * TICKS_PER_REV) + 0.5f);
   if(ticks >= 0.0f)
   {
-    return (int)(ticks + 0.5f);
+    rounded = (int)(ticks + 0.5f);
   }
-  return (int)(ticks - 0.5f);
+  else
+  {
+    rounded = (int)(ticks - 0.5f);
+  }
+  if(min_ticks < 0) min_ticks = 0;
+  if(max_ticks < 0) max_ticks = 0;
+  if(min_ticks > max_ticks) min_ticks = max_ticks;
+  if(rounded < min_ticks) return min_ticks;
+  return rounded;
 }
 
 static void print_q1000(int value)
@@ -255,8 +273,8 @@ int main(void)
   print("raw_floats=%d padded_floats=%d\n",
       LINE_FOLLOW_MODEL_RAW_FLOATS, LINE_FOLLOW_MODEL_PADDED_FLOATS);
   print("hidden_size=%d num_layers=%d\n", HIDDEN_SIZE, NUM_LAYERS);
-  print("scale action<=0 stops wheel, action=1 -> %d mm/s, tire=65 mm, ticks/rev=64\n",
-      (int)(MAX_WHEEL_SPEED_MPS * 1000.0f + 0.5f));
+  print("scale policy wheels floor to %d ticks/s, action=1 -> %d mm/s, tire=65 mm, ticks/rev=64\n",
+      (int)(MIN_DRIVE_TICKS_PER_SEC), (int)(MAX_WHEEL_SPEED_MPS * 1000.0f + 0.5f));
   print("no QTI reads, no drive output, MinGRU state reset per row\n");
   print("M name left middle right action0 action1 left_ticks right_ticks\n");
 

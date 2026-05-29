@@ -500,6 +500,10 @@ or lost-line grace. The current `max_wheel_speed_mps = 0.116` is the doubled
 ActivityBot speed window: `action=0.5` is about `18 ticks/s`, and `action=1.0`
 is about `36 ticks/s`. At the default H8/L0 measured `dt=0.024`, full-speed
 travel is about `2.78 mm` per policy decision.
+`min_drive_ticks_per_sec = 6` applies a small anti-stall floor to policy-driven
+wheel commands, about `19.1 mm/s` with the measured 65 mm tires. This uses the
+first smooth slow drive probe; `2 ticks/s` moved inconsistently, `3 ticks/s`
+produced repeatable but weak encoder movement, and `6 ticks/s` was smoother.
 `progress_reward_scale = 1.0`, `time_penalty = 0.005`, and
 `idle_penalty = 0.02` keep centered forward progress positive while making
 stopped or crawling policies lose reward. The env records centerline quality
@@ -514,6 +518,9 @@ corrective turn is needed but the desired outside wheel is below
 `firmware_loop_ms = 0` means the Propeller loop does not request an extra
 post-inference pause; real control period is then
 determined by QTI reads, model inference, drive calls, and serial printing.
+Drive-enabled firmware builds default `LINE_FOLLOW_MAX_LOOPS = 0`, which means
+no loop cap; the robot keeps running until reset or power-off unless a caller
+explicitly sets `LINE_FOLLOW_MAX_LOOPS`.
 
 ## QTI Sensor Facts
 
@@ -657,13 +664,18 @@ left_unit   = max(clamp(action[0], -1, 1), 0)
 right_unit  = max(clamp(action[1], -1, 1), 0)
 v_left_cmd  = left_unit * max_wheel_speed_mps
 v_right_cmd = right_unit * max_wheel_speed_mps
+if policy drive is enabled:
+    v_left_cmd  = max(v_left_cmd, min_drive_ticks_per_sec converted to m/s)
+    v_right_cmd = max(v_right_cmd, min_drive_ticks_per_sec converted to m/s)
 ```
 
-This branch trains non-reversing wheel commands. `action <= 0` means stopped,
-and `action=1` means the configured max speed. Negative actions are allowed by
-the policy interface but are clamped to a stopped wheel and penalized rather
-than used as reverse by default. The idle penalty is based on average commanded
-wheel speed, so the inside wheel may stop for sharper turns.
+This branch trains non-reversing wheel commands. Negative actions are allowed by
+the policy interface but are clamped to a non-reversing wheel and penalized
+rather than used as reverse by default. With the default anti-stall floor, a
+policy command below the deadband still maps to `6 ticks/s` during live drive;
+explicit startup/shutdown calls still use `drive_speed(0, 0)`. The idle penalty
+is based on average commanded wheel speed, so a tiny inside-wheel floor is still
+treated as crawling when the outside wheel is not moving enough.
 
 For PufferLib/Ocean binding this should follow the existing continuous-action
 pattern used by `ocean/squared_continuous`:
@@ -690,6 +702,7 @@ max_ticks_per_s
 left_speed_scale
 right_speed_scale
 command_deadband
+min_drive_ticks_per_sec
 command_slew_limit
 ```
 
@@ -713,7 +726,7 @@ Per-step reward components:
 - idle_penalty when average post-deadband wheel command is below threshold
 - turn_speed_penalty when the desired outside wheel is too slow during a
   privileged corrective turn
-- negative wheel commands clamp that wheel to stopped and receive
+- negative wheel commands clamp that wheel to the non-reversing floor and receive
   reverse_penalty_scale proportional to the negative command amount
 + success_reward on timeout or track completion only if the robot stayed on
   the line, never idled, and scaled by the episode progress-times-accuracy perf
@@ -798,6 +811,7 @@ max_ticks_per_s
 left_speed_scale
 right_speed_scale
 command_deadband
+min_drive_ticks_per_sec
 command_slew_limit
 sensor_inner_x_m
 sensor_outer_x_m
@@ -1034,9 +1048,9 @@ final `env/perf=0.297`, `env/score=0.591`, `env/episode_return=-1.300`,
 `checkpoints/line_follow/1779952610219/0000000199753728.bin`. Bounded
 `DISPLAY=:0` eval loaded the checkpoint successfully. Host smoke still shows
 some negative raw actions on synthetic one-hot cases; current sim versions
-clamp negative wheel commands to zero speed and penalize the negative command
-amount, matching host/Propeller deployment clamps. Treat this old checkpoint as
-not drive-approved.
+clamp negative wheel commands to non-reversing wheel speed and penalize the
+negative command amount. This old checkpoint predates the anti-stall floor;
+treat it as not drive-approved.
 
 That run predates the measured three-sensor timing target. Retrain before
 treating the current `dt=0.024` / architecture sweep config as evaluated.

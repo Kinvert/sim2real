@@ -75,6 +75,9 @@
 #ifndef COMMAND_DEADBAND
 #define COMMAND_DEADBAND 0.04f
 #endif
+#ifndef MIN_DRIVE_TICKS_PER_SEC
+#define MIN_DRIVE_TICKS_PER_SEC 6
+#endif
 #define TIRE_DIAMETER_M 0.065f
 #define TICKS_PER_REV 64.0f
 #define LINE_FOLLOW_PI 3.14159265358979323846f
@@ -238,6 +241,9 @@ static int action_to_ticks(float action)
   float unit = clipped;
   float mps;
   float ticks;
+  int rounded;
+  int min_ticks = MIN_DRIVE_TICKS_PER_SEC;
+  int max_ticks;
 
   if(unit < 0.0f)
   {
@@ -251,11 +257,21 @@ static int action_to_ticks(float action)
 
   mps = unit * MAX_WHEEL_SPEED_MPS;
   ticks = (mps / (LINE_FOLLOW_PI * TIRE_DIAMETER_M)) * TICKS_PER_REV;
+  max_ticks = (int)(((MAX_WHEEL_SPEED_MPS / (LINE_FOLLOW_PI * TIRE_DIAMETER_M))
+      * TICKS_PER_REV) + 0.5f);
   if(ticks >= 0.0f)
   {
-    return (int)(ticks + 0.5f);
+    rounded = (int)(ticks + 0.5f);
   }
-  return (int)(ticks - 0.5f);
+  else
+  {
+    rounded = (int)(ticks - 0.5f);
+  }
+  if(min_ticks < 0) min_ticks = 0;
+  if(max_ticks < 0) max_ticks = 0;
+  if(min_ticks > max_ticks) min_ticks = max_ticks;
+  if(rounded < min_ticks) return min_ticks;
+  return rounded;
 }
 
 static void print_float3(float value)
@@ -330,11 +346,12 @@ int main(void)
   print("hidden_size=%d num_layers=%d\n", HIDDEN_SIZE, NUM_LAYERS);
   print("pins left=%d middle=%d right=%d\n",
       QTI_LEFT_PIN, QTI_MIDDLE_PIN, QTI_RIGHT_PIN);
-  print("cal white=%d black=%d threshold_q1000=%d loop_ms=%d max_loops=%d print_every=%d max_speed_mm_s=%d deadband_q1000=%d\n",
+  print("cal white=%d black=%d threshold_q1000=%d loop_ms=%d max_loops=%d print_every=%d max_speed_mm_s=%d deadband_q1000=%d min_ticks=%d\n",
       QTI_WHITE_TIME, QTI_BLACK_TIME, QTI_THRESHOLD_Q1000,
       LINE_FOLLOW_LOOP_MS, LINE_FOLLOW_MAX_LOOPS, LINE_FOLLOW_PRINT_EVERY,
       (int)(MAX_WHEEL_SPEED_MPS * 1000.0f + 0.5f),
-      (int)(COMMAND_DEADBAND * 1000.0f + 0.5f));
+      (int)(COMMAND_DEADBAND * 1000.0f + 0.5f),
+      (int)(MIN_DRIVE_TICKS_PER_SEC));
   print("clock clkfreq=%d ms_ticks=%d\n", CLKFREQ, ms);
   print("NOTE lower raw should be brighter/whiter, higher raw should be darker/blacker\n");
   print("model observations are left, middle, right; pin 4 is ignored\n");

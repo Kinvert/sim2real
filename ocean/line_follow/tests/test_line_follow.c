@@ -74,7 +74,8 @@ static void test_propeller_qti_normalization_parity(void) {
 
 static void test_continuous_actions(void) {
     float actions[2] = {-2.0f, 2.0f};
-    LineFollowWheelCommand cmd = map_actions(actions, 0.5f, 0.05f, 1.0f, 1.0f);
+    LineFollowWheelCommand cmd = map_actions(actions, 0.5f, 0.05f,
+        0.065f, 0.0f, 1.0f, 1.0f);
     expect_near(actions[0], -1.0f, 1e-6f, "left action clamps low");
     expect_near(actions[1], 1.0f, 1e-6f, "right action clamps high");
     expect_near(cmd.left_action, -1.0f, 1e-6f, "clamped left command keeps signed normalized action");
@@ -82,18 +83,18 @@ static void test_continuous_actions(void) {
     expect_near(cmd.right_mps, 0.5f, 1e-6f, "plus-one right action maps to max wheel speed");
 
     float tiny[2] = {0.02f, -0.04f};
-    cmd = map_actions(tiny, 0.5f, 0.05f, 1.0f, 1.0f);
+    cmd = map_actions(tiny, 0.5f, 0.05f, 0.065f, 0.0f, 1.0f, 1.0f);
     expect_near(cmd.left_mps, 0.0f, 1e-6f, "near-zero left action maps to stopped wheel");
     expect_near(cmd.right_mps, 0.0f, 1e-6f, "negative near-zero right action maps to stopped wheel");
 
     float stop[2] = {-0.96f, -0.88f};
-    cmd = map_actions(stop, 0.5f, 0.05f, 1.0f, 1.0f);
+    cmd = map_actions(stop, 0.5f, 0.05f, 0.065f, 0.0f, 1.0f, 1.0f);
     expect_near(cmd.left_mps, 0.0f, 1e-6f, "left negative command maps to zero");
     expect_near(cmd.right_mps, 0.0f, 1e-6f,
         "right negative command maps to zero");
 
     float polarity[2] = {1.0f, -1.0f};
-    cmd = map_actions(polarity, 0.35f, 0.0f, 1.0f, 1.0f);
+    cmd = map_actions(polarity, 0.35f, 0.0f, 0.065f, 0.0f, 1.0f, 1.0f);
     expect_near(cmd.left_mps, 0.35f, 1e-6f, "positive left command drives left wheel forward");
     expect_near(cmd.right_action, -1.0f, 1e-6f, "minus-one right command keeps signed normalized action");
     expect_near(cmd.right_mps, 0.0f, 1e-6f, "minus-one right command maps to stopped wheel speed");
@@ -103,6 +104,23 @@ static void test_continuous_actions(void) {
         "half wheel command maps to half policy action");
     expect_near(raw_action_from_command(1.0f), 1.0f, 1e-6f,
         "full wheel command maps to plus-one policy action");
+
+    float min_mps = wheel_ticks_per_sec_to_mps(6.0f, 0.065f);
+    float floored[2] = {0.0f, -1.0f};
+    cmd = map_actions(floored, 0.5f, 0.05f, 0.065f, 6.0f, 1.0f, 1.0f);
+    expect_near(min_mps, 0.019144f, 1e-6f,
+        "six ticks per second converts to measured anti-stall mps");
+    expect_near(cmd.left_mps, min_mps, 1e-6f,
+        "zero left policy command is floored to anti-stall speed");
+    expect_near(cmd.right_mps, min_mps, 1e-6f,
+        "negative right policy command is floored to anti-stall speed");
+
+    float capped[2] = {0.0f, 1.0f};
+    cmd = map_actions(capped, 0.005f, 0.05f, 0.065f, 6.0f, 1.0f, 1.0f);
+    expect_near(cmd.left_mps, 0.005f, 1e-6f,
+        "anti-stall floor caps at configured max wheel speed");
+    expect_near(cmd.right_mps, 0.005f, 1e-6f,
+        "anti-stall floor does not exceed max wheel speed");
 }
 
 static void test_measured_geometry_defaults(void) {
@@ -148,6 +166,8 @@ static void test_measured_geometry_defaults(void) {
         "idle wheel penalty prevents centered stop reward hacking");
     expect_near(env.min_wheel_action, 0.35f, 1e-6f,
         "idle threshold pushes pivot turns to keep the outside wheel moving");
+    expect_near(env.min_drive_ticks_per_sec, 6.0f, 1e-6f,
+        "anti-stall wheel floor defaults to the first smooth measured slow speed");
     expect_near(env.track_complete_margin_m, 0.02f, 1e-6f,
         "completion margin is scaled for paper-sized tracks");
     expect_near(env.wheel_base_m, 0.125f, 1e-6f, "measured tire-to-tire width is default wheel base");
@@ -641,8 +661,10 @@ static void test_negative_wheel_command_is_penalized_without_terminal(void) {
 
     c_step(&env);
 
-    expect_near(env.v_left_cmd, 0.0f, 1e-6f,
-        "negative normalized left action maps to a stopped wheel in sim");
+    expect_near(env.v_left_cmd,
+        wheel_ticks_per_sec_to_mps(env.min_drive_ticks_per_sec, env.tire_diameter_m),
+        1e-6f,
+        "negative normalized left action maps to the anti-stall wheel floor in sim");
     expect_true(env.v_right_cmd > env.v_left_cmd,
         "positive normalized right action maps faster than the left wheel");
     expect_near(terminals[0], 0.0f, 1e-6f,

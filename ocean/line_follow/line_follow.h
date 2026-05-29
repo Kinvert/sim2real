@@ -19,6 +19,7 @@
 #define LINE_FOLLOW_TRAJECTORY_CAP 512
 #define LINE_FOLLOW_ACCURACY_ZERO_M 0.030f
 #define LINE_FOLLOW_REWARD_ZERO_M 0.015f
+#define LINE_FOLLOW_TICKS_PER_REV 64.0f
 #define LINE_FOLLOW_LEFT 0
 #define LINE_FOLLOW_MIDDLE 1
 #define LINE_FOLLOW_RIGHT 2
@@ -109,6 +110,7 @@ struct LineFollow {
     float tire_width_m;
     float motor_lag_alpha;
     float command_deadband;
+    float min_drive_ticks_per_sec;
     float left_speed_scale;
     float right_speed_scale;
 
@@ -240,6 +242,7 @@ void set_defaults(LineFollow* env) {
     env->tire_width_m = 0.012f;
     env->motor_lag_alpha = 0.65f;
     env->command_deadband = 0.04f;
+    env->min_drive_ticks_per_sec = 6.0f;
     env->left_speed_scale = 1.0f;
     env->right_speed_scale = 1.0f;
 
@@ -591,8 +594,17 @@ static inline float raw_action_from_command(float command) {
     return clampf(command, 0.0f, 1.0f);
 }
 
+static inline float wheel_ticks_per_sec_to_mps(float ticks_per_sec, float tire_diameter_m) {
+    if (ticks_per_sec <= 0.0f || tire_diameter_m <= 0.0f) {
+        return 0.0f;
+    }
+    return ticks_per_sec * (LINE_FOLLOW_PI * tire_diameter_m) / LINE_FOLLOW_TICKS_PER_REV;
+}
+
 LineFollowWheelCommand map_actions(float* actions, float max_wheel_speed_mps,
-        float command_deadband, float left_speed_scale, float right_speed_scale) {
+        float command_deadband, float tire_diameter_m,
+        float min_drive_ticks_per_sec, float left_speed_scale,
+        float right_speed_scale) {
     LineFollowWheelCommand cmd;
     actions[0] = bounded_policy_action(actions[0]);
     actions[1] = bounded_policy_action(actions[1]);
@@ -607,8 +619,20 @@ LineFollowWheelCommand map_actions(float* actions, float max_wheel_speed_mps,
     if (right_unit < command_deadband) {
         right_unit = 0.0f;
     }
-    cmd.left_mps = left_unit * max_wheel_speed_mps * left_speed_scale;
-    cmd.right_mps = right_unit * max_wheel_speed_mps * right_speed_scale;
+    float left_max_mps = fmaxf(0.0f, max_wheel_speed_mps * left_speed_scale);
+    float right_max_mps = fmaxf(0.0f, max_wheel_speed_mps * right_speed_scale);
+    float min_drive_mps = wheel_ticks_per_sec_to_mps(
+        min_drive_ticks_per_sec, tire_diameter_m);
+    cmd.left_mps = left_unit * left_max_mps;
+    cmd.right_mps = right_unit * right_max_mps;
+    if (min_drive_mps > 0.0f) {
+        if (left_max_mps > 0.0f) {
+            cmd.left_mps = fmaxf(cmd.left_mps, fminf(min_drive_mps, left_max_mps));
+        }
+        if (right_max_mps > 0.0f) {
+            cmd.right_mps = fmaxf(cmd.right_mps, fminf(min_drive_mps, right_max_mps));
+        }
+    }
     return cmd;
 }
 
@@ -932,6 +956,7 @@ void c_step(LineFollow* env) {
     env->raw_action_abs_sum += 0.5f * (fabsf(raw_left_action) + fabsf(raw_right_action));
     LineFollowWheelCommand cmd = map_actions(env->actions,
         env->max_wheel_speed_mps, env->command_deadband,
+        env->tire_diameter_m, env->min_drive_ticks_per_sec,
         env->left_speed_scale, env->right_speed_scale);
     env->v_left_cmd = cmd.left_mps;
     env->v_right_cmd = cmd.right_mps;

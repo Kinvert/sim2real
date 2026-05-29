@@ -218,6 +218,7 @@ static void accumulate_step_stats(LineFollow* env, BenchStats* stats) {
     float temp[2] = {env->actions[0], env->actions[1]};
     LineFollowWheelCommand cmd = map_actions(temp,
         env->max_wheel_speed_mps, env->command_deadband,
+        env->tire_diameter_m, env->min_drive_ticks_per_sec,
         env->left_speed_scale, env->right_speed_scale);
     stats->raw_action_sum[0] += env->actions[0];
     stats->raw_action_sum[1] += env->actions[1];
@@ -281,7 +282,8 @@ static BenchStats run_case(LineFollow* env, PufferNet* net, Controller controlle
 static void print_usage(const char* argv0) {
     fprintf(stderr,
         "Usage: %s WEIGHTS.bin [--dt SEC] [--dt-min SEC] [--dt-max SEC] "
-        "[--motor-lag-alpha A] [--max-wheel-speed-mps MPS] [--command-deadband X] [--max-steps N] "
+        "[--motor-lag-alpha A] [--max-wheel-speed-mps MPS] [--command-deadband X] "
+        "[--min-drive-ticks-per-sec N] [--max-steps N] "
         "[--controller model|straight|heuristic] [--suite standard|stress|seeded_random|all] "
         "[--json PATH] [--training-log PATH]\n",
         argv0);
@@ -378,6 +380,7 @@ static void write_json_summary(const char* path, const char* controller_name,
     fprintf(f, "    \"max_wheel_speed_mps\": %.6f,\n", env->max_wheel_speed_mps);
     fprintf(f, "    \"motor_lag_alpha\": %.6f,\n", env->motor_lag_alpha);
     fprintf(f, "    \"command_deadband\": %.6f,\n", env->command_deadband);
+    fprintf(f, "    \"min_drive_ticks_per_sec\": %.6f,\n", env->min_drive_ticks_per_sec);
     fprintf(f, "    \"min_wheel_action\": %.6f,\n", env->min_wheel_action);
     fprintf(f, "    \"min_turn_outer_action\": %.6f,\n", env->min_turn_outer_action);
     fprintf(f, "    \"lost_line_limit\": %d,\n", env->lost_line_limit);
@@ -520,6 +523,8 @@ int main(int argc, char** argv) {
             env.max_wheel_speed_mps = strtof(argv[++i], NULL);
         } else if (strcmp(argv[i], "--command-deadband") == 0 && i + 1 < argc) {
             env.command_deadband = strtof(argv[++i], NULL);
+        } else if (strcmp(argv[i], "--min-drive-ticks-per-sec") == 0 && i + 1 < argc) {
+            env.min_drive_ticks_per_sec = strtof(argv[++i], NULL);
         } else if (strcmp(argv[i], "--max-steps") == 0 && i + 1 < argc) {
             env.max_steps = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--controller") == 0 && i + 1 < argc) {

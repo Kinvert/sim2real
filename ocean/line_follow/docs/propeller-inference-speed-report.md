@@ -108,7 +108,8 @@ Important details from the code:
 - `forward_model` runs encoder linear, then decoder linear when
   `NUM_LAYERS == 0`.
 - `DECODER_SIZE` is 3, but only action outputs 0 and 1 are used.
-- `action_to_ticks` clamps negative actions to zero before converting to ticks.
+- `action_to_ticks` clamps negative actions to zero, applies the deadband, then
+  floors policy-driven wheel commands to the anti-stall tick speed.
 - The loop calls `pause(LINE_FOLLOW_LOOP_MS)` at the end only when the configured
   pause is greater than zero.
 
@@ -269,13 +270,15 @@ is:
 ```text
 1.0 action -> 0.116 m/s
 0.116 m/s with 65 mm tires and 64 ticks/rev -> about 36 ticks/s
+anti-stall floor -> 6 ticks/s -> about 19.1 mm/s
 ```
 
-The current deployment mapping is non-reversing: `action<=0` maps to stopped,
-`action=0.5` maps to about 18 ticks/s, and `action=1` maps to about 36 ticks/s.
-So deployment can compute an action score
-in fixed point, apply the 0.04 deadband threshold in the same scale, clamp
-negatives to zero, and map to ticks.
+The current deployment mapping is non-reversing: negative actions clamp to zero,
+the 0.04 deadband then applies, and policy-driven wheels are floored to
+`MIN_DRIVE_TICKS_PER_SEC = 6`. So `action<=0` maps to the anti-stall floor
+during live drive, `action=0.5` maps to about 18 ticks/s, and `action=1` maps to
+about 36 ticks/s. Explicit startup/shutdown calls still command `drive_speed(0,
+0)`.
 
 Why not fp16 or smaller floats?
 
