@@ -1,6 +1,6 @@
 #include "line_follow.h"
 
-#define OBS_SIZE 4
+#define OBS_SIZE 3
 #define NUM_ATNS 2
 #define ACT_SIZES {1, 1}
 #define OBS_TENSOR_T FloatTensor
@@ -37,12 +37,14 @@ void my_init(Env* env, Dict* kwargs) {
     env->progress_reward_scale = dict_get(kwargs, "progress_reward_scale")->value;
     env->centerline_penalty_scale = dict_get(kwargs, "centerline_penalty_scale")->value;
     env->centerline_reward_interval_m = dict_get(kwargs, "centerline_reward_interval_m")->value;
-    env->centerline_reward_scale = dict_get(kwargs, "centerline_reward_scale")->value;
     env->success_reward = dict_get(kwargs, "success_reward")->value;
     env->heading_penalty_scale = dict_get(kwargs, "heading_penalty_scale")->value;
     env->lost_line_penalty = dict_get(kwargs, "lost_line_penalty")->value;
+    env->off_track_terminal_penalty = dict_get(kwargs, "off_track_terminal_penalty")->value;
     env->action_smoothness_penalty = dict_get(kwargs, "action_smoothness_penalty")->value;
+    env->action_bound_penalty_scale = dict_get(kwargs, "action_bound_penalty_scale")->value;
     env->turn_penalty_scale = dict_get(kwargs, "turn_penalty_scale")->value;
+    env->steering_correction_scale = dict_get(kwargs, "steering_correction_scale")->value;
     env->time_penalty = dict_get(kwargs, "time_penalty")->value;
     env->idle_penalty = dict_get(kwargs, "idle_penalty")->value;
     env->min_wheel_action = dict_get(kwargs, "min_wheel_action")->value;
@@ -51,8 +53,7 @@ void my_init(Env* env, Dict* kwargs) {
     env->track_complete_margin_m = dict_get(kwargs, "track_complete_margin_m")->value;
 
     env->sensor_forward_m = dict_get(kwargs, "sensor_forward_m")->value;
-    env->sensor_inner_lateral_m = dict_get(kwargs, "sensor_inner_lateral_m")->value;
-    env->sensor_outer_lateral_m = dict_get(kwargs, "sensor_outer_lateral_m")->value;
+    env->sensor_side_lateral_m = dict_get(kwargs, "sensor_side_lateral_m")->value;
     env->sensor_lateral_jitter_m = dict_get(kwargs, "sensor_lateral_jitter_m")->value;
     env->sensor_forward_jitter_m = dict_get(kwargs, "sensor_forward_jitter_m")->value;
     env->sensor_noise_std = dict_get(kwargs, "sensor_noise_std")->value;
@@ -92,11 +93,14 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "avg_forward_speed_mps", log->avg_forward_speed_mps);
     dict_set(out, "avg_speed_frac", log->avg_speed_frac);
     dict_set(out, "negative_action_frac", log->negative_action_frac);
+    dict_set(out, "action_bound_violation", log->action_bound_violation);
+    dict_set(out, "raw_action_abs", log->raw_action_abs);
     dict_set(out, "terminal_timeout", log->terminal_timeout);
     dict_set(out, "terminal_lost_line", log->terminal_lost_line);
     dict_set(out, "terminal_too_far", log->terminal_too_far);
     dict_set(out, "terminal_track_complete", log->terminal_track_complete);
     dict_set(out, "terminal_negative", log->terminal_negative);
+    dict_set(out, "terminal_action_bound", log->terminal_action_bound);
     dict_set(out, "terminal_success", log->terminal_success);
     dict_set(out, "n", log->n);
 }

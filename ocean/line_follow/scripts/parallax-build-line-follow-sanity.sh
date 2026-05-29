@@ -49,10 +49,9 @@ args=(
   -DLINE_FOLLOW_ENABLE_DRIVE="$ENABLE_DRIVE"
   -DLINE_FOLLOW_FAKE_OBS="$FAKE_OBS"
   -DLINE_FOLLOW_MAX_LOOPS="$MAX_LOOPS"
-  -DQTI_OUTER_LEFT_PIN="${QTI_OUTER_LEFT_PIN:-7}"
-  -DQTI_INNER_LEFT_PIN="${QTI_INNER_LEFT_PIN:-6}"
-  -DQTI_INNER_RIGHT_PIN="${QTI_INNER_RIGHT_PIN:-5}"
-  -DQTI_OUTER_RIGHT_PIN="${QTI_OUTER_RIGHT_PIN:-4}"
+  -DQTI_LEFT_PIN="${QTI_LEFT_PIN:-7}"
+  -DQTI_MIDDLE_PIN="${QTI_MIDDLE_PIN:-6}"
+  -DQTI_RIGHT_PIN="${QTI_RIGHT_PIN:-5}"
   -DQTI_WHITE_TIME="${QTI_WHITE_TIME:-$LINE_FOLLOW_QTI_WHITE_TIME_DEFAULT}"
   -DQTI_BLACK_TIME="${QTI_BLACK_TIME:-$LINE_FOLLOW_QTI_BLACK_TIME_DEFAULT}"
   -DQTI_THRESHOLD_Q1000="${QTI_THRESHOLD_Q1000:-500}"
@@ -85,7 +84,7 @@ propeller-elf-gcc "${args[@]}" -o "$OUT" "$SRC" "${libs[@]}"
 
 propeller-elf-size "$OUT"
 echo "Built $OUT"
-echo "Loop period: ${LOOP_MS} ms"
+echo "Loop pause: ${LOOP_MS} ms"
 if [[ "$ENABLE_DRIVE" == "1" ]]; then
   echo "Drive output is ENABLED for $MAX_LOOPS loops. Use only with the robot safely staged."
 elif [[ "$FAKE_OBS" == "1" ]]; then

@@ -18,15 +18,26 @@ def parse_row(line):
         step = int(parts[1])
     except ValueError:
         return None
-    row = {
-        "step": step,
-        "raw": [int(v) for v in parts[2:6]],
-        "obs": [int(v) for v in parts[14:18]],
-        "action": [float(v) for v in parts[18:20]],
-        "ticks": [int(v) for v in parts[20:22]],
-    }
-    if len(parts) >= 23:
-        row["dt_ms"] = int(parts[22])
+    if len(parts) >= 25:
+        row = {
+            "step": step,
+            "raw": [int(v) for v in parts[2:6]],
+            "obs": [int(v) for v in parts[14:18]],
+            "model_obs": [int(v) for v in parts[18:20]],
+            "action": [float(v) for v in parts[20:22]],
+            "ticks": [int(v) for v in parts[22:24]],
+            "dt_ms": int(parts[24]),
+        }
+    else:
+        row = {
+            "step": step,
+            "raw": [int(v) for v in parts[2:5]],
+            "obs": [int(v) for v in parts[11:14]],
+            "model_obs": [int(v) for v in parts[14:17]],
+            "action": [float(v) for v in parts[17:19]],
+            "ticks": [int(v) for v in parts[19:21]],
+            "dt_ms": int(parts[21]),
+        }
     if timestamp is not None:
         row["timestamp"] = timestamp
     return row
@@ -63,7 +74,8 @@ def main():
     if not rows:
         raise SystemExit("No live telemetry rows found")
 
-    labels = ["outer_left", "inner_left", "inner_right", "outer_right"]
+    labels = ["left", "middle", "right"] if len(rows[0]["raw"]) == 3 else [
+        "outer_left", "inner_left", "inner_right", "outer_right"]
     print(f"rows={len(rows)} first_step={rows[0]['step']} last_step={rows[-1]['step']}")
     timestamp_rows = [row for row in rows if "timestamp" in row]
     if len(timestamp_rows) >= 2:
@@ -78,13 +90,17 @@ def main():
                 f"p95={percentile(loop_ms, 95):.1f} max={max(loop_ms):.1f} "
                 f"mean={statistics.mean(loop_ms):.1f}"
             )
-    dt_values = [row["dt_ms"] for row in rows if "dt_ms" in row and row["dt_ms"] > 0]
+    raw_dt_values = [row["dt_ms"] for row in rows if "dt_ms" in row and row["dt_ms"] > 0]
+    dt_values = [value for value in raw_dt_values if value <= 1000]
     if dt_values:
         print(
             f"loop_dt_ms min={min(dt_values)} p50={percentile(dt_values, 50):.1f} "
             f"p95={percentile(dt_values, 95):.1f} max={max(dt_values)} "
             f"mean={statistics.mean(dt_values):.1f}"
         )
+    ignored_dt = len(raw_dt_values) - len(dt_values)
+    if ignored_dt:
+        print(f"ignored_implausible_loop_dt_ms={ignored_dt}")
     print("raw rc_time values: lower should be brighter/whiter, higher should be darker/blacker")
     for i, label in enumerate(labels):
         raw_values = [row["raw"][i] for row in rows]
@@ -115,6 +131,17 @@ def main():
             f"ticks_max={ticks_max:4d} ticks_mean={ticks_mean:7.1f} "
             f"clipped_action_rows={clipped}"
         )
+    model_rows = [row for row in rows if "model_obs" in row]
+    if model_rows:
+        print("model observations used by policy:")
+        model_labels = ["left", "middle", "right"] if len(model_rows[0]["model_obs"]) == 3 else [
+            "inner_left", "inner_right"]
+        for i, label in enumerate(model_labels):
+            values = [row["model_obs"][i] for row in model_rows]
+            print(
+                f"{label:12s} obs_min={min(values):4d} obs_max={max(values):4d} "
+                f"obs_mean={statistics.mean(values):6.1f}"
+            )
 
 
 if __name__ == "__main__":

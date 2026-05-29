@@ -7,15 +7,21 @@
 #include <string.h>
 
 #include "ocean/line_follow/line_follow.h"
-#include "src/puffernet.h"
+#include "ocean/line_follow/host/line_follow_puffernet.h"
 
-#define OBS_SIZE 4
+#define OBS_SIZE LINE_FOLLOW_OBS_SIZE
 #define NUM_ACTIONS 2
 #ifndef HIDDEN_SIZE
-#define HIDDEN_SIZE 8
+#define HIDDEN_SIZE 4
 #endif
 #ifndef NUM_LAYERS
 #define NUM_LAYERS 0
+#endif
+#ifndef HEURISTIC_BASE
+#define HEURISTIC_BASE 0.42f
+#endif
+#ifndef HEURISTIC_GAIN
+#define HEURISTIC_GAIN 0.85f
 #endif
 
 typedef struct {
@@ -25,7 +31,14 @@ typedef struct {
     float b;
     float lateral_offset_m;
     float heading_offset_rad;
+    bool mirror_y;
 } BenchCase;
+
+typedef enum {
+    CONTROLLER_MODEL,
+    CONTROLLER_STRAIGHT,
+    CONTROLLER_HEURISTIC,
+} Controller;
 
 typedef struct {
     int steps;
@@ -56,19 +69,20 @@ static void reset_recurrent_state(PufferNet* net) {
 }
 
 static bool generate_case_track(LineFollow* env, const BenchCase* c) {
+    bool ok = false;
     if (c->family == LINE_FOLLOW_TRACK_STRAIGHT) {
-        return generate_straight(&env->track, c->a, env->episode_line_width_m, env->track_bounds_m);
+        ok = generate_straight(&env->track, c->a, env->episode_line_width_m, env->track_bounds_m);
+    } else if (c->family == LINE_FOLLOW_TRACK_ARC) {
+        ok = generate_arc(&env->track, c->a, c->b, env->episode_line_width_m, env->track_bounds_m);
+    } else if (c->family == LINE_FOLLOW_TRACK_S_CURVE) {
+        ok = generate_s_curve(&env->track, c->a, c->b, env->episode_line_width_m, env->track_bounds_m);
+    } else if (c->family == LINE_FOLLOW_TRACK_OVAL) {
+        ok = generate_oval(&env->track, c->a, c->b, env->episode_line_width_m, env->track_bounds_m);
     }
-    if (c->family == LINE_FOLLOW_TRACK_ARC) {
-        return generate_arc(&env->track, c->a, c->b, env->episode_line_width_m, env->track_bounds_m);
+    if (ok && c->mirror_y) {
+        ok = track_mirror_y(&env->track);
     }
-    if (c->family == LINE_FOLLOW_TRACK_S_CURVE) {
-        return generate_s_curve(&env->track, c->a, c->b, env->episode_line_width_m, env->track_bounds_m);
-    }
-    if (c->family == LINE_FOLLOW_TRACK_OVAL) {
-        return generate_oval(&env->track, c->a, c->b, env->episode_line_width_m, env->track_bounds_m);
-    }
-    return false;
+    return ok;
 }
 
 static void reset_case(LineFollow* env, const BenchCase* c) {
@@ -144,19 +158,39 @@ static void accumulate_step_stats(LineFollow* env, BenchStats* stats) {
     }
 }
 
-static BenchStats run_case(LineFollow* env, PufferNet* net, const BenchCase* c) {
+static void set_heuristic_actions(LineFollow* env) {
+    float left_dark = env->observations[0];
+    float right_dark = env->observations[2];
+    float correction = HEURISTIC_GAIN * (left_dark - right_dark);
+    float base = HEURISTIC_BASE;
+
+    env->actions[0] = raw_action_from_command(base - correction);
+    env->actions[1] = raw_action_from_command(base + correction);
+}
+
+static BenchStats run_case(LineFollow* env, PufferNet* net, Controller controller,
+        const BenchCase* c) {
     BenchStats stats;
     memset(&stats, 0, sizeof(stats));
-    reset_recurrent_state(net);
+    if (net != NULL) {
+        reset_recurrent_state(net);
+    }
     reset_case(env, c);
 
     int max_steps = env->max_steps;
     for (int step = 0; step < max_steps; step++) {
-        forward_puffernet(net, env->observations, env->actions);
+        if (controller == CONTROLLER_MODEL) {
+            forward_puffernet(net, env->observations, env->actions);
+        } else if (controller == CONTROLLER_HEURISTIC) {
+            set_heuristic_actions(env);
+        } else {
+            env->actions[0] = raw_action_from_command(1.0f);
+            env->actions[1] = raw_action_from_command(1.0f);
+        }
         accumulate_step_stats(env, &stats);
         c_step(env);
         stats.steps += 1;
-        stats.reward += env->last_reward;
+        stats.reward += env->rewards[0];
         if (env->terminals[0] > 0.0f) {
             break;
         }
@@ -169,7 +203,8 @@ static BenchStats run_case(LineFollow* env, PufferNet* net, const BenchCase* c) 
 static void print_usage(const char* argv0) {
     fprintf(stderr,
         "Usage: %s WEIGHTS.bin [--dt SEC] [--dt-min SEC] [--dt-max SEC] "
-        "[--motor-lag-alpha A] [--max-wheel-speed-mps MPS] [--max-steps N]\n",
+        "[--motor-lag-alpha A] [--max-wheel-speed-mps MPS] [--max-steps N] "
+        "[--controller model|straight|heuristic]\n",
         argv0);
 }
 
@@ -180,6 +215,7 @@ int main(int argc, char** argv) {
     }
 
     const char* weights_path = argv[1];
+    Controller controller = CONTROLLER_MODEL;
 
     float observations[LINE_FOLLOW_OBS_SIZE] = {0};
     float actions[LINE_FOLLOW_NUM_ATNS] = {0};
@@ -195,75 +231,105 @@ int main(int argc, char** argv) {
     env.terminals = terminals;
     env.rng = 123u;
 
+    bool explicit_timing = false;
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--dt") == 0 && i + 1 < argc) {
             env.dt = strtof(argv[++i], NULL);
             env.dt_min = env.dt;
             env.dt_max = env.dt;
+            explicit_timing = true;
         } else if (strcmp(argv[i], "--dt-min") == 0 && i + 1 < argc) {
             env.dt_min = strtof(argv[++i], NULL);
+            explicit_timing = true;
         } else if (strcmp(argv[i], "--dt-max") == 0 && i + 1 < argc) {
             env.dt_max = strtof(argv[++i], NULL);
+            explicit_timing = true;
         } else if (strcmp(argv[i], "--motor-lag-alpha") == 0 && i + 1 < argc) {
             env.motor_lag_alpha = strtof(argv[++i], NULL);
         } else if (strcmp(argv[i], "--max-wheel-speed-mps") == 0 && i + 1 < argc) {
             env.max_wheel_speed_mps = strtof(argv[++i], NULL);
         } else if (strcmp(argv[i], "--max-steps") == 0 && i + 1 < argc) {
             env.max_steps = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--controller") == 0 && i + 1 < argc) {
+            const char* value = argv[++i];
+            if (strcmp(value, "model") == 0) {
+                controller = CONTROLLER_MODEL;
+            } else if (strcmp(value, "straight") == 0) {
+                controller = CONTROLLER_STRAIGHT;
+            } else if (strcmp(value, "heuristic") == 0) {
+                controller = CONTROLLER_HEURISTIC;
+            } else {
+                print_usage(argv[0]);
+                return 2;
+            }
         } else {
             print_usage(argv[0]);
             return 2;
         }
     }
-
-    Weights* weights = load_weights(weights_path);
-    if (weights == NULL) {
-        return 1;
+    if (!explicit_timing) {
+        apply_model_timing(&env);
     }
 
-    int raw_floats = weights->size - 7;
-    int expected = expected_raw_float_count();
-    if (raw_floats != expected) {
-        fprintf(stderr,
-            "Checkpoint size mismatch: raw_floats=%d expected=%d hidden_size=%d num_layers=%d\n",
-            raw_floats, expected, HIDDEN_SIZE, NUM_LAYERS);
-        free(weights);
-        return 1;
-    }
+    Weights* weights = NULL;
+    PufferNet* net = NULL;
+    int raw_floats = 0;
+    if (controller == CONTROLLER_MODEL) {
+        weights = load_weights(weights_path);
+        if (weights == NULL) {
+            return 1;
+        }
 
-    int logit_sizes[NUM_ACTIONS] = {1, 1};
-    PufferNet* net = make_puffernet(weights, 1, OBS_SIZE, HIDDEN_SIZE,
-        NUM_LAYERS, logit_sizes, NUM_ACTIONS);
+        raw_floats = weights->size - 7;
+        int expected = expected_raw_float_count();
+        if (raw_floats != expected) {
+            fprintf(stderr,
+                "Checkpoint size mismatch: raw_floats=%d expected=%d hidden_size=%d num_layers=%d\n",
+                raw_floats, expected, HIDDEN_SIZE, NUM_LAYERS);
+            free(weights);
+            return 1;
+        }
+
+        int logit_sizes[NUM_ACTIONS] = {1, 1};
+        net = make_puffernet(weights, 1, OBS_SIZE, HIDDEN_SIZE,
+            NUM_LAYERS, logit_sizes, NUM_ACTIONS);
+    }
 
     const BenchCase cases[] = {
-        {"straight_center", LINE_FOLLOW_TRACK_STRAIGHT, 0.36f, 0.0f, 0.000f, 0.000f},
-        {"straight_inner_l", LINE_FOLLOW_TRACK_STRAIGHT, 0.36f, 0.0f, 0.020f, 0.000f},
-        {"straight_inner_r", LINE_FOLLOW_TRACK_STRAIGHT, 0.36f, 0.0f, -0.020f, 0.000f},
-        {"straight_outer_l", LINE_FOLLOW_TRACK_STRAIGHT, 0.36f, 0.0f, 0.040f, 0.000f},
-        {"straight_outer_r", LINE_FOLLOW_TRACK_STRAIGHT, 0.36f, 0.0f, -0.040f, 0.000f},
-        {"gentle_arc", LINE_FOLLOW_TRACK_ARC, 0.18f, 1.0f, 0.000f, 0.000f},
-        {"s_curve", LINE_FOLLOW_TRACK_S_CURVE, 0.36f, 0.035f, 0.000f, 0.000f},
-        {"oval", LINE_FOLLOW_TRACK_OVAL, 0.09f, 0.055f, 0.000f, 0.000f},
+        {"straight_center", LINE_FOLLOW_TRACK_STRAIGHT, 0.36f, 0.0f, 0.000f, 0.000f, false},
+        {"straight_left_10mm", LINE_FOLLOW_TRACK_STRAIGHT, 0.36f, 0.0f, 0.010f, 0.000f, false},
+        {"straight_right_10mm", LINE_FOLLOW_TRACK_STRAIGHT, 0.36f, 0.0f, -0.010f, 0.000f, false},
+        {"straight_left_sensor", LINE_FOLLOW_TRACK_STRAIGHT, 0.36f, 0.0f, 0.020f, 0.000f, false},
+        {"straight_right_sensor", LINE_FOLLOW_TRACK_STRAIGHT, 0.36f, 0.0f, -0.020f, 0.000f, false},
+        {"straight_yaw_left", LINE_FOLLOW_TRACK_STRAIGHT, 0.36f, 0.0f, 0.000f, 0.20f, false},
+        {"straight_yaw_right", LINE_FOLLOW_TRACK_STRAIGHT, 0.36f, 0.0f, 0.000f, -0.20f, false},
+        {"arc_left", LINE_FOLLOW_TRACK_ARC, 0.18f, 1.0f, 0.000f, 0.000f, false},
+        {"arc_right", LINE_FOLLOW_TRACK_ARC, 0.18f, 1.0f, 0.000f, 0.000f, true},
+        {"s_curve", LINE_FOLLOW_TRACK_S_CURVE, 0.36f, 0.035f, 0.000f, 0.000f, false},
+        {"s_curve_mirror", LINE_FOLLOW_TRACK_S_CURVE, 0.36f, 0.035f, 0.000f, 0.000f, true},
+        {"oval", LINE_FOLLOW_TRACK_OVAL, 0.09f, 0.055f, 0.000f, 0.000f, false},
     };
     int num_cases = (int)(sizeof(cases) / sizeof(cases[0]));
 
-    printf("weights=%s floats=%d hidden=%d layers=%d dt=%.3f motor_lag_alpha=%.3f max_wheel_speed_mps=%.3f\n",
-        weights_path, raw_floats, HIDDEN_SIZE, NUM_LAYERS,
+    const char* controller_name = controller == CONTROLLER_MODEL ? "model"
+        : controller == CONTROLLER_HEURISTIC ? "heuristic" : "straight";
+    printf("controller=%s weights=%s floats=%d hidden=%d layers=%d dt=%.3f motor_lag_alpha=%.3f max_wheel_speed_mps=%.3f\n",
+        controller_name, weights_path, raw_floats, HIDDEN_SIZE, NUM_LAYERS,
         env.dt, env.motor_lag_alpha, env.max_wheel_speed_mps);
-    printf("case,steps,perf,progress_frac,progress_m,avg_raw_left,avg_raw_right,avg_cmd_left_mps,avg_cmd_right_mps,avg_speed_frac,idle_frac,all_white_frac,visible_frac,lost,timeout,complete,success,reward\n");
+    printf("case,steps,perf,progress_frac,progress_m,avg_raw_left,avg_raw_right,avg_cmd_left_mps,avg_cmd_right_mps,avg_speed_frac,idle_frac,all_white_frac,visible_frac,lost,timeout,complete,negative,action_bound,success,reward\n");
 
     float total_perf = 0.0f;
     float total_progress_frac = 0.0f;
     float total_idle_frac = 0.0f;
     float total_all_white_frac = 0.0f;
     for (int i = 0; i < num_cases; i++) {
-        BenchStats stats = run_case(&env, net, &cases[i]);
+        BenchStats stats = run_case(&env, net, controller, &cases[i]);
         float steps = (float)fmaxf((float)stats.steps, 1.0f);
         total_perf += env.log.perf;
         total_progress_frac += env.log.progress_frac;
         total_idle_frac += (float)stats.idle_steps / steps;
         total_all_white_frac += (float)stats.all_white_steps / steps;
-        printf("%s,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.0f,%.0f,%.0f,%.6f,%.6f\n",
+        printf("%s,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.0f,%.0f,%.0f,%.0f,%.0f,%.6f,%.6f\n",
             cases[i].name,
             stats.steps,
             env.log.perf,
@@ -280,17 +346,21 @@ int main(int argc, char** argv) {
             env.log.terminal_lost_line,
             env.log.terminal_timeout,
             env.log.terminal_track_complete,
+            env.log.terminal_negative,
+            env.log.terminal_action_bound,
             env.log.terminal_success,
             stats.reward);
     }
 
-    printf("summary,0,%.6f,%.6f,0,0,0,0,0,0,%.6f,%.6f,0,0,0,0,0,0\n",
+    printf("summary,0,%.6f,%.6f,0,0,0,0,0,0,%.6f,%.6f,0,0,0,0,0,0,0,0\n",
         total_perf / (float)num_cases,
         total_progress_frac / (float)num_cases,
         total_idle_frac / (float)num_cases,
         total_all_white_frac / (float)num_cases);
 
-    free_puffernet(net);
+    if (net != NULL) {
+        free_puffernet(net);
+    }
     free(weights);
     return 0;
 }

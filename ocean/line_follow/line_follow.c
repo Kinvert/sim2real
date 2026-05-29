@@ -5,9 +5,14 @@
 
 #include "line_follow.h"
 
+static void set_command_actions(LineFollow* env, float left, float right) {
+    env->actions[0] = raw_action_from_command(left);
+    env->actions[1] = raw_action_from_command(right);
+}
+
 static void set_heuristic_actions(LineFollow* env) {
-    float left_dark = env->observations[0] + env->observations[1];
-    float right_dark = env->observations[2] + env->observations[3];
+    float left_dark = env->observations[0];
+    float right_dark = env->observations[2];
     float correction = 0.85f * (left_dark - right_dark);
     float base = 0.42f;
 
@@ -19,13 +24,13 @@ static void set_heuristic_actions(LineFollow* env) {
     }
 
     if (!line_seen) {
-        env->actions[0] = 0.25f;
-        env->actions[1] = -0.25f;
+        set_command_actions(env, base, base);
         return;
     }
 
-    env->actions[0] = clampf(base - correction, -1.0f, 1.0f);
-    env->actions[1] = clampf(base + correction, -1.0f, 1.0f);
+    set_command_actions(env,
+        clampf(base - correction, -1.0f, 1.0f),
+        clampf(base + correction, -1.0f, 1.0f));
 }
 
 static void set_manual_actions(LineFollow* env) {
@@ -36,14 +41,16 @@ static void set_manual_actions(LineFollow* env) {
     if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) turn -= 0.55f;
     if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) turn += 0.55f;
 
-    env->actions[0] = clampf(throttle - turn, -1.0f, 1.0f);
-    env->actions[1] = clampf(throttle + turn, -1.0f, 1.0f);
+    set_command_actions(env,
+        clampf(throttle - turn, -1.0f, 1.0f),
+        clampf(throttle + turn, -1.0f, 1.0f));
 }
 
 int main(int argc, char** argv) {
     LineFollow env;
     memset(&env, 0, sizeof(env));
     set_defaults(&env);
+    apply_model_timing(&env);
     env.rng = (unsigned int)time(NULL);
 
     bool manual = false;

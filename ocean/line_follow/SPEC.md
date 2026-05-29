@@ -2,7 +2,7 @@
 
 This project is the line-following sim2real path for a Parallax ActivityBot with
 a QTI Line Follower kit. The target real task is simple: drive on white paper and
-follow black marker or tape lines using the four QTI sensors.
+follow black marker or tape lines using the currently selected three QTI sensors.
 
 The project lives in:
 
@@ -23,9 +23,11 @@ I will add notes as I find them. Once you write them up better and put them in t
 Train a small PufferLib policy in simulation, export it into a tiny format, and
 run it on the Parallax ActivityBot using Propeller C.
 
-The policy deployed to the robot should consume the same four normalized QTI
-readings and choose the same wheel-speed actions used in sim. The robot-side code
-should not depend on Python, Torch, ONNX Runtime, or hosted OS libraries.
+The current deployment policy consumes three normalized QTI readings ordered
+`[left, middle, right]` from pins `[P7, P6, P5]`; P4/far-right is ignored on the
+current branch. It chooses the same wheel-speed actions used in sim. The
+robot-side code should not depend on Python, Torch, ONNX Runtime, or hosted OS
+libraries.
 
 ## Current Proven Hardware Workflow
 
@@ -73,7 +75,9 @@ programs from this repo.
 V1 should be the smallest trainable environment that can plausibly transfer:
 
 - A differential-drive robot.
-- Four QTI-like downward-facing sensors with analog-like RC decay readings.
+- Three policy-facing QTI-like downward-facing sensors with analog-like RC decay
+  readings ordered `[left, middle, right]`; the physically mounted P4/far-right
+  sensor is ignored by this branch.
 - A white floor with a black line represented analytically.
 - Two continuous actions that map directly to left/right wheel speeds.
 - Domain randomization for geometry, sensing, and drive response.
@@ -94,7 +98,7 @@ versus MLP, and related policy choices are training choices, not env semantics.
 The hard deployment contract is:
 
 ```text
-explicit current obs[4] -> policy_forward in simple C -> continuous action[2]
+explicit current obs[3] -> policy_forward in simple C -> continuous action[2]
 ```
 
 Do not add hidden env observations such as previous QTI readings unless they are
@@ -105,9 +109,10 @@ environment input.
 
 ## Stretch Goals
 
-Once the normal four-sensor policy works, add sensor-failure robustness. The env
-should be able to randomize an episode where zero, one, or two QTI sensors are
-failed. A failed sensor should look like a plausible real failure mode, such as
+Once the normal three-sensor policy works, add sensor-failure robustness. The env
+should be able to randomize an episode where zero, one, two, or three QTI
+sensors are failed. A failed sensor should look like a plausible real failure
+mode, such as
 stuck-white, stuck-black, stuck-at-calibrated-midpoint, high noise, or unplugged
 timeout. The purpose is to make the deployed robot degrade gracefully if a QTI
 wire loosens or a sensor is unplugged mid-run.
@@ -145,15 +150,25 @@ Downloaded reference copies live locally under this ignored path:
 ocean/line_follow/docs/vendor/parallax-qti/
 ```
 
-Observation order must be stable in sim and real:
+Physical sensor order must be stable in sim and real. The current 3-sensor
+policy observes:
 
 ```text
-[outer_left, inner_left, inner_right, outer_right]
+[left, middle, right]
 ```
 
 If the real wiring ends up in a different physical order, robot-side code should
-reorder the pins before passing observations into the policy. The policy should
-not need to know board pin numbers.
+reorder the pins before telemetry or before selecting the policy inputs. The
+current firmware default pin mapping is:
+
+```text
+left   = P7
+middle = P6
+right  = P5
+```
+
+P4 / far-right is intentionally ignored on the current branch. The policy
+should not need to know board pin numbers.
 
 ## Measured ActivityBot Geometry
 
@@ -170,18 +185,17 @@ body behind axle:                  90 mm = 0.090 m
 body ahead of axle:                40 mm = 0.040 m
 total body length around axle:    130 mm = 0.130 m
 QTI sensor forward offset:         45 mm = 0.045 m ahead of axle
-inner QTI lateral offsets:        +/-20 mm = +/-0.020 m from robot centerline
-outer QTI lateral offsets:        +/-40 mm = +/-0.040 m from robot centerline
-outer-left to outer-right spread:  80 mm = 0.080 m
+side QTI lateral offsets:         +/-20 mm = +/-0.020 m from robot centerline
+middle QTI lateral offset:          0 mm = 0.000 m from robot centerline
+left-to-right policy spread:       40 mm = 0.040 m
 ```
 
 Nominal QTI body-frame positions:
 
 ```text
-outer_left   = (forward_m = 0.045, lateral_m =  0.040)
-inner_left   = (forward_m = 0.045, lateral_m =  0.020)
-inner_right  = (forward_m = 0.045, lateral_m = -0.020)
-outer_right  = (forward_m = 0.045, lateral_m = -0.040)
+left    = (forward_m = 0.045, lateral_m =  0.020)
+middle  = (forward_m = 0.045, lateral_m =  0.000)
+right   = (forward_m = 0.045, lateral_m = -0.020)
 ```
 
 The sim and renderer should treat these as the nominal geometry before applying
@@ -275,6 +289,10 @@ Start with simple generated tracks:
 - Oval or rounded-rectangle loop.
 - S-curve built from alternating arcs.
 - Piecewise straight + circular-arc route with bounded curvature.
+
+For the current random training generator, pure straight tracks are excluded
+because a saturated forward policy can score by chance. Straight tracks remain
+available as explicit test/eval/smoke cases.
 
 Do not use bitmap image sampling for v1. Geometric distance-to-line from fixed
 track primitives or sampled polyline segments is faster, deterministic, and
@@ -436,9 +454,9 @@ response.
 Current assumed sim control rate for the smaller model:
 
 ```text
-dt = 0.065 seconds
-dt_min = 0.045 seconds
-dt_max = 0.090 seconds
+dt = 0.024 seconds
+dt_min = 0.020 seconds
+dt_max = 0.035 seconds
 ```
 
 This is not a pause inserted into PufferLib. It is the distance-integration time
@@ -453,9 +471,12 @@ During training, the env samples an episode-level `episode_dt` from
 `[dt_min, dt_max]` and uses that value for kinematic integration. The previous
 hidden-size-16 recurrent exported model measured about 476.6 ms/update; the
 hidden-size-8 recurrent model measured about 187.5 ms/update with the same
-requested 25 ms Propeller pause. The hidden-size-8 feed-forward model measured
-about 52.3 ms/update in telemetry-only mode and about 64.6 ms/update in the
-drive log, so the default H8/L0 timing target is now 65 ms.
+requested 25 ms Propeller pause. After switching to three policy observations
+and hidden-size-8 with no recurrent layer, the RAM-only Propeller model measured
+about 24.0 ms/update with `LINE_FOLLOW_LOOP_MS=0` and amortized serial
+telemetry. That H8/L0 shape is the current default because the middle sensor
+removes the all-white centered-state ambiguity that broke the two-sensor
+feed-forward policy.
 
 The env applies model-aware timing before init when `model_dt_enabled = 1`.
 PufferLib syncs the selected `[policy] hidden_size` and `num_layers` into
@@ -463,9 +484,9 @@ PufferLib syncs the selected `[policy] hidden_size` and `num_layers` into
 the real control period from that model shape. Current estimates are:
 
 ```text
-H2/L0  ->  45 ms
-H4/L0  ->  55 ms
-H8/L0  ->  65 ms
+H2/L0  ->  18 ms
+H4/L0  ->  20 ms
+H8/L0  ->  24 ms
 H2/L1  ->  70 ms
 H4/L1  -> 105 ms
 H8/L1  -> 188 ms
@@ -474,15 +495,18 @@ H16/L1 -> 477 ms
 
 When derived `dt` changes, `max_steps` and `lost_line_limit` are scaled
 inversely so larger/slower models do not receive extra wall-clock episode time
-or lost-line grace. The current `max_wheel_speed_mps = 0.010` keeps full-speed
-travel near 0.65 mm per default H8/L0 policy decision. `progress_reward_scale =
-2.0`, `time_penalty = 0.02`, and `idle_penalty = 0.02` keep centered forward
-progress positive while making stopped or crawling policies lose reward. The env also pays a
-centerline-quality bonus every `centerline_reward_interval_m = 0.025` meters of
-true progress, penalizes turn command magnitude, and penalizes both wheel
-commands being idle. `firmware_loop_ms = 25` is a separate firmware-build
-constant: it is the requested Propeller pause after each loop, not the canonical
-sim `dt`.
+or lost-line grace. The current `max_wheel_speed_mps = 0.038` uses the
+post-calibration ActivityBot speed window: about `6 ticks/s` slow,
+`9 ticks/s` medium, and `12 ticks/s` fast. At the default H8/L0 measured
+`dt=0.024`, full-speed travel is about `0.91 mm` per policy decision.
+`progress_reward_scale = 1.0`, `time_penalty = 0.005`, and
+`idle_penalty = 0.02` keep centered forward progress positive while making
+stopped or crawling policies lose reward. The env also pays a fixed 0..1
+centerline-quality bonus every `centerline_reward_interval_m = 0.010` meters of
+true progress and penalizes both wheel commands being idle.
+`firmware_loop_ms = 0` means the Propeller loop does not request an extra
+post-inference pause; real control period is then
+determined by QTI reads, model inference, drive calls, and serial printing.
 
 ## QTI Sensor Facts
 
@@ -528,16 +552,17 @@ Official Parallax sources imply these constraints:
 
 ## Sensor Model
 
-There are four downward-facing QTI sensors rigidly attached to the robot. Sensor
-world positions are computed from robot pose and randomized body-frame offsets.
+There are three policy-facing downward QTI sensors rigidly attached to the
+robot. Sensor world positions are computed from robot pose and randomized
+body-frame offsets. The far-right/P4 sensor may still be physically mounted, but
+it is ignored by the current policy and firmware.
 
 Nominal body-frame layout uses the measured axle-centered coordinates above:
 
 ```text
-outer_left   forward = sensor_forward_m, lateral =  sensor_outer_lateral_m
-inner_left   forward = sensor_forward_m, lateral =  sensor_inner_lateral_m
-inner_right  forward = sensor_forward_m, lateral = -sensor_inner_lateral_m
-outer_right  forward = sensor_forward_m, lateral = -sensor_outer_lateral_m
+left    forward = sensor_forward_m, lateral =  sensor_side_lateral_m
+middle  forward = sensor_forward_m, lateral =  0
+right   forward = sensor_forward_m, lateral = -sensor_side_lateral_m
 ```
 
 Each sensor samples local surface reflectance under a small footprint, not just
@@ -557,7 +582,8 @@ white / high reflection -> lower decay time
 black / low reflection  -> higher decay time
 ```
 
-The default policy observation is four normalized floats:
+Each policy-facing physical sensor is normalized to `0..1`. The default policy
+observation is the three normalized floats:
 
 ```text
 obs = clamp((decay_time - qti_white_time) / (qti_black_time - qti_white_time), 0, 1)
@@ -566,8 +592,8 @@ obs = clamp((decay_time - qti_white_time) / (qti_black_time - qti_white_time), 0
 ```
 
 The same 0-1 convention must be used on the ActivityBot. Robot-side Propeller C
-should normalize each `rc_time` reading with the same polarity before calling the
-policy:
+should normalize each `rc_time` reading with the same polarity, then pass the
+left, middle, and right values to the policy:
 
 ```text
 obs = clamp((qti_raw - qti_white_calibration) / (qti_black_calibration - qti_white_calibration), 0, 1)
@@ -620,9 +646,15 @@ action[1] = right_wheel_command in [-1.0, 1.0]
 The env clamps both values to `[-1, 1]`, then maps them to wheel speeds:
 
 ```text
-v_left_cmd  = action[0] * max_wheel_speed_mps
-v_right_cmd = action[1] * max_wheel_speed_mps
+left_unit   = 0.5 * (clamp(action[0], -1, 1) + 1)
+right_unit  = 0.5 * (clamp(action[1], -1, 1) + 1)
+v_left_cmd  = left_unit * max_wheel_speed_mps
+v_right_cmd = right_unit * max_wheel_speed_mps
 ```
+
+This branch trains non-reversing wheel commands. `action=-1` means stopped,
+`action=0` means half of the configured max speed, and `action=1` means the
+configured max speed.
 
 For PufferLib/Ocean binding this should follow the existing continuous-action
 pattern used by `ocean/squared_continuous`:
@@ -637,8 +669,8 @@ The real robot adapter maps the same normalized actions to ActivityBot
 servo command for this ActivityBot hardware:
 
 ```text
-left_ticks_per_s  = clamp(action[0], -1, 1) * max_ticks_per_s
-right_ticks_per_s = clamp(action[1], -1, 1) * max_ticks_per_s
+left_ticks_per_s  = 0.5 * (clamp(action[0], -1, 1) + 1) * max_ticks_per_s
+right_ticks_per_s = 0.5 * (clamp(action[1], -1, 1) + 1) * max_ticks_per_s
 ```
 
 The exact speed range should be randomized per episode around nominal values:
@@ -664,8 +696,8 @@ recoverable.
 Per-step reward components:
 
 ```text
-+ (progress_delta / 0.025 m) * accuracy_score * progress_reward_scale
-+ every 25 mm of true progress: accuracy_score * centerline_reward_scale
++ (progress_delta / 0.025 m) * reward_centerline_score * progress_reward_scale
++ every 25 mm of true progress: reward_centerline_score
 - optional centerline_distance_penalty from privileged true state
 - heading_error_penalty from privileged track tangent
 - lost_line_penalty when privileged geometry says the line left the sensor span
@@ -679,15 +711,37 @@ Per-step reward components:
   the line, never idled, and scaled by the episode progress-times-accuracy perf
 ```
 
+The final reward emitted to PufferLib is clipped to `[-1, 1]` after all shaping
+and terminal bonus terms are applied.
+
 `accuracy_score` is a simple millimeter-scale centerline score:
 
 ```text
-1.0 at <= 5 mm centerline error
-0.9 at 10 mm
-0.8 at 15 mm
-0.7 at 20 mm, where a measured inner sensor is directly over the stripe center
-linear falloff beyond that, clamped to [0, 1]
+1.0 at 0 mm centerline error
+0.833 at 5 mm
+0.667 at 10 mm
+0.500 at 15 mm
+0.333 at 20 mm, where a measured inner sensor is directly over the stripe center
+0.000 at 30 mm and beyond
 ```
+
+With side sensors at +/-20 mm and an 18 mm nominal stripe, 30 mm is the
+zero-quality point for centerline accuracy. Lost-line termination remains based
+on privileged sensor-span geometry and may allow a few extra millimeters because
+line width, edge softness, and sensor placement are randomized.
+
+For reward shaping, `reward_centerline_score` uses the same 30 mm scale but is
+signed and clipped:
+
+```text
+1.0 at 0 mm centerline error
+ 0.0 at 30 mm centerline error
+-1.0 at 60 mm centerline error and beyond
+```
+
+`perf` and checkpoint accuracy remain bounded 0..1 metrics for W&B and model
+selection. Training reward uses the signed score so blind forward progress after
+losing the line becomes negative rather than merely unrewarded.
 
 Reward should use the true simulated state, not only what the QTI sensors can
 observe. For example, if the line is between the two right sensors, the policy
@@ -767,9 +821,9 @@ start_heading_offset_rad
 
 Randomization should start wide but not absurd. If training fails completely,
 narrow the ranges until a policy learns, then widen them incrementally.
-Current reset sampling chooses among the current episode's four jittered sensor
+Current reset sampling chooses among the current episode's three jittered sensor
 lateral targets plus centered, so some episodes begin with the black line under
-an outer QTI sensor rather than only near the center pair.
+the left or right policy sensor rather than only at the center sensor.
 
 ## Rendering
 
@@ -782,8 +836,9 @@ The raylib renderer should show:
 - Tires/wheels as top-down black bars, placed from the measured 125 mm
   tire-to-tire width. The measured 65 mm tire diameter is the fore/aft length
   of each bar in the top-down view.
-- Four sensor positions using the measured 45 mm forward offset and
-  +/-20 mm / +/-40 mm lateral offsets.
+- Three policy sensor positions using the measured 45 mm forward offset and
+  lateral offsets `[+20 mm, 0 mm, -20 mm]`. P4/far-right may be physically
+  mounted but is not part of the current policy/render contract.
 - Sensor positions, normalized QTI levels, and thresholded black/white debug
   state.
 - Recent trajectory.
@@ -902,6 +957,10 @@ Native CUDA training and eval:
 ```bash
 .venv/bin/python -m pufferlib.pufferl train line_follow --train.gpus 1
 
+.venv/bin/python -m pufferlib.pufferl sweep line_follow \
+  --sweep.gpus 1 --train.gpus 1 --sweep.max-runs 1000 \
+  --wandb --wandb-project sim1
+
 DISPLAY=:0 .venv/bin/python -m pufferlib.pufferl eval line_follow \
   --train.gpus 1 --load-model-path latest
 ```
@@ -912,7 +971,8 @@ devices; if training fails with `CUDA is not available`, rerun with GPU-visible
 permissions rather than switching to the CPU backend. Do not add ad hoc
 `--train.total-timesteps ...` overrides for line-follow probes; use the
 checked-in `config/line_follow.ini` budget unless the user explicitly requests a
-different budget. The eval command loops until the raylib window exits; for a
+different budget. Sweeps should also use the checked-in training budget unless
+explicitly told otherwise. The eval command loops until the raylib window exits; for a
 bounded render/load smoke check, prefix with `PYTHONUNBUFFERED=1 DISPLAY=:0
 timeout 10s`.
 
@@ -957,9 +1017,8 @@ instead clamp negative wheel commands to zero speed and penalize the negative
 command amount, matching host/Propeller deployment clamps. Treat this old
 checkpoint as not drive-approved.
 
-That run predates model-aware dt coupling and used an overlarge feed-forward
-timing target. Retrain before treating the current `dt=0.065` / architecture
-sweep config as evaluated.
+That run predates the measured three-sensor timing target. Retrain before
+treating the current `dt=0.024` / architecture sweep config as evaluated.
 
 The first `sim1` sweep after shrinking the deployable model plateaued near
 `env/perf=0.33`. Investigation found two measurement issues: reset was crediting
@@ -972,8 +1031,8 @@ in the target progress distance count as zero, so a short-lived episode cannot
 get `perf=1.0` just because its starting pose was centered. If ten checkpoints
 are physically possible during the episode, hitting five with average accuracy
 `0.8` gives `perf = 0.8 * 5 / 10 = 0.4`.
-The highest-reward state is centered over the line even when the narrow stripe is
-between the inner sensors and all four QTI readings are white. Lost-line
+The highest-reward state is centered over the line, with the middle sensor over
+the stripe and symmetric side-sensor context. Lost-line
 termination uses privileged simulator geometry: the true stripe must leave the
 actual sensor span, independent of noisy or thresholded sensor observations.
 The follow-up failure mode was centered stopping: a policy could park on the
@@ -989,13 +1048,17 @@ earn a survival bonus.
 
 Training should start with easier curricula:
 
-1. Straight lines with low randomization.
-2. Gentle arc-only curves and S-curves.
-3. Closed smooth loops such as ovals and rounded rectangles.
+1. Gentle arc-only curves and S-curves.
+2. Closed smooth loops such as ovals and rounded rectangles.
+3. Explicit straight-line smoke/eval cases only, not random training wins.
 4. Wider sensor/drive/line-reflectance randomization.
 5. More aggressive start offsets.
 6. Held-out tracks from different primitive-generator seeds.
 7. Later curriculum: radiused 90-degree turns, then sharp 90-degree turns.
+
+Random training starts are clamped to `start_lateral_offset_m = 0.025` meters so
+the line starts inside the active inner-sensor span. Heading starts randomize up
+to `start_heading_offset_rad = 0.261799` radians, about 15 degrees.
 
 Short-run acceptance checks:
 
@@ -1048,9 +1111,9 @@ hidden_size = 8
 num_layers = 0
 
 [env]
-dt = 0.065
-dt_min = 0.045
-dt_max = 0.090
+dt = 0.024  # measured H8/L0 three-sensor Prop C loop without per-tick serial printing
+dt_min = 0.020
+dt_max = 0.035
 policy_hidden_size = 8
 policy_num_layers = 0
 model_dt_enabled = 1
@@ -1061,10 +1124,12 @@ max = 8
 mean = 4
 
 [sweep.policy.num_layers]
-min = 0
-max = 1
-mean = 0
+not swept by default; keep num_layers = 0 unless recurrence is deliberately tested
 ```
+
+With `model_dt_enabled = 1`, those reference values keep the default H8/L0
+episode range at `dt = 0.024`, `dt_min = 0.020`, and `dt_max = 0.035`, while
+smaller or recurrent policies get their own estimated timing.
 
 Initial deployment-focused sweeps should prefer:
 
@@ -1072,12 +1137,12 @@ Initial deployment-focused sweeps should prefer:
 - larger hidden sizes only as upper-bound comparisons.
 - the normal PufferLib training stack unless a concrete export/deployment reason
   forces a change.
-- feed-forward policies first because they are simplest to export to Propeller C.
-- recurrent policies only if feed-forward policies fail, and only if the
-  recurrent state can be represented and updated in simple C.
-- if `num_layers=1` is swept, the candidate must use its slower estimated `dt`;
-  do not compare recurrent and feed-forward models at the same kinematic update
-  period.
+- H4/L0 and H2/L0 are useful timing lower bounds for the three-observation
+  policy, but they must beat the H8/L0 deterministic benchmark before deployment.
+- recurrent policies are timing-penalized candidates only; the current default
+  is feed-forward H8/L0.
+- every candidate must use its estimated `dt`; do not compare different model
+  sizes at the same kinematic update period.
 
 Every sweep candidate should be judged by both sim score and deployability:
 
@@ -1101,7 +1166,7 @@ goal.
 Robot deployment should preserve the same interface:
 
 ```text
-qti_pins -> rc_time readings -> normalized obs[4] in fixed order -> policy_forward(obs) -> action[2]
+qti_pins[3] -> rc_time readings -> normalized obs[left, middle, right] -> policy_forward(obs) -> action[2]
 action[2] -> clamp/scale -> drive_speed(left_ticks_per_s, right_ticks_per_s)
 ```
 
@@ -1124,13 +1189,17 @@ The script builds `ocean/line_follow/host/line_follow_model_smoke.c`, loads the
 latest `checkpoints/line_follow/**/*.bin` checkpoint by default, and prints:
 
 ```text
-obs[4] -> raw continuous action[2] -> clamped m/s -> approximate ticks/second
+obs[3] -> raw continuous action[2] -> clamped m/s -> approximate ticks/second
 ```
 
 It uses the deployment geometry/scaling assumptions:
 
 ```text
-action [-1, 1] -> +/-0.010 m/s
+action [-1, 1] -> [0, 0.038] m/s
+approximately [0, 12] ActivityBot ticks/s
+action 0.0 -> about 6 ticks/s
+action 0.5 -> about 9 ticks/s
+action 1.0 -> about 12 ticks/s
 65 mm tire diameter
 64 encoder ticks / wheel revolution
 ```
@@ -1138,7 +1207,7 @@ action [-1, 1] -> +/-0.010 m/s
 To test one hand-written observation:
 
 ```text
-ocean/line_follow/scripts/line-follow-model-smoke.sh 0.2 0.7 0.7 0.2
+ocean/line_follow/scripts/line-follow-model-smoke.sh 0.7 0.1 0.0
 ```
 
 Each row resets the native MinGRU state so synthetic cases are independent. A
@@ -1170,25 +1239,13 @@ runs the embedded trained PufferLib model forward pass in Propeller C, and
 prints:
 
 ```text
-M name obs0 obs1 obs2 obs3 action0 action1 left right
+M name left middle right action0 action1 left_ticks right_ticks
 ```
 
-Current host-side smoke output for the measured-control checkpoint:
-
-```text
-weights=/home/claude/sim2real/checkpoints/line_follow/1779950360328/0000000199753728.bin
-scale: action [-1,1] -> +/-0.010 m/s -> approx +/-3.1 ticks/s
-all_white     ticks/s=[ 3  3]
-center_black  ticks/s=[ 6  5]
-left_black    ticks/s=[-6  6]
-right_black   ticks/s=[ 5 -3]
-outer_left    ticks/s=[-6  4]
-outer_right   ticks/s=[-6  6]  # wrong direction for a pure outer-right hit
-inner_left    ticks/s=[ 2  6]
-inner_right   ticks/s=[ 6  1]
-soft_left     ticks/s=[-3  6]
-soft_right    ticks/s=[ 6  0]
-```
+Old two-observation and four-observation checkpoints are intentionally
+incompatible after the three-sensor switch. Re-run training before using the
+host or Propeller model smoke tools; the shape check should fail if an old
+checkpoint is accidentally selected.
 
 Earlier Propeller fake-observation runs matched host-side native C smoke for the
 same checkpoint and cases, confirming the checkpoint format, weight alignment,
@@ -1211,7 +1268,8 @@ and runs fixed track/start cases. The output is CSV-like and includes:
 ```text
 case,steps,perf,progress_frac,progress_m,avg_raw_left,avg_raw_right,
 avg_cmd_left_mps,avg_cmd_right_mps,avg_speed_frac,idle_frac,
-all_white_frac,visible_frac,lost,timeout,complete,success,reward
+all_white_frac,visible_frac,lost,timeout,complete,negative,action_bound,
+success,reward
 ```
 
 Useful deterministic timing/control probes:
@@ -1222,13 +1280,13 @@ ocean/line_follow/scripts/line-follow-policy-benchmark.sh --motor-lag-alpha 1.0
 ocean/line_follow/scripts/line-follow-policy-benchmark.sh --dt 0.025 --motor-lag-alpha 1.0
 ```
 
-Current benchmark finding for checkpoint
-`checkpoints/line_follow/1779995626730/0000000199753728.bin`: centered starts
-where the narrow line is between the inner sensors produce `obs=[0,0,0,0]` and
-deterministic mean action `[0,0]`. Smaller `dt` and smaller motor lag do not fix
-that case. This is an observation-aliasing problem for a feed-forward policy:
-all-white can mean either perfectly centered between the inner sensors or lost
-outside the sensor span.
+Current benchmark finding for the measured-dt three-sensor checkpoint
+`checkpoints/line_follow/rvpus7ld/0000000199753728.bin`: deterministic model
+perf is `0.443619`, straight-controller perf is `0.441905`, and the simple
+three-sensor heuristic perf is `0.374801`. The model has sane left/right
+steering responses, but it is only barely above going straight on the fixed
+suite, so do not treat this checkpoint as closed-loop drive-approved. The main
+training issue is still policy quality, not checkpoint export plumbing.
 
 ## Propeller C Live QTI Model Telemetry
 
@@ -1239,9 +1297,10 @@ drive output:
 ocean/line_follow/firmware/line_follow_model_live.c
 ```
 
-This firmware runs on the robot. It reads the real QTI sensors, normalizes them,
-runs the embedded trained model, prints raw/min/max/obs/action/ticks, and does
-not command motors unless built with `--drive`.
+This firmware runs on the robot. It reads the real three active QTI sensors,
+normalizes them, feeds `[left, middle, right]` into the embedded trained model,
+prints raw/min/max/sensor/model/action/ticks/timing, and does not command motors
+unless built with `--drive`. P4/far-right is ignored in this branch.
 
 Build and run the telemetry-only version:
 
@@ -1259,15 +1318,15 @@ ocean/line_follow/scripts/analyze-line-follow-live-log.py ocean/line_follow/buil
 The live row format is:
 
 ```text
-L step raw0 raw1 raw2 raw3 min0 min1 min2 min3 max0 max1 max2 max3 obs0 obs1 obs2 obs3 action0 action1 left right
+L step raw0 raw1 raw2 min0 min1 min2 max0 max1 max2 sensor0 sensor1 sensor2 model0 model1 model2 action0 action1 left right dt_ms
 ```
 
 For loop timing measurements, run the loader with `--host-timestamps`. The host
 then prefixes each `L` row with a high-resolution timestamp, and
 `analyze-line-follow-live-log.py` reports `host_loop_ms` by dividing elapsed host
-time by telemetry step deltas. Older logs may include a trailing Propeller
-`dt_ms` field; the analyzer still accepts it, but host timestamps are the current
-verified path.
+time by telemetry step deltas. Current three-sensor firmware also emits a
+trailing Propeller body-time `dt_ms` field; verify it against host timestamps
+after timing-related firmware edits.
 
 The QTI polarity assumption is that lower raw RC-time values are
 brighter/whiter and higher raw values are darker/blacker. Current normalization
@@ -1354,44 +1413,39 @@ timeout 20s ocean/line_follow/scripts/parallax-run-line-follow-sanity.sh --fake 
 The fake-observation output table is:
 
 ```text
-F name obs0 obs1 obs2 obs3 left right
-F all_white 0.000 0.000 0.000 0.000 12 -12
-F all_black 1.000 1.000 1.000 1.000 20 20
-F center_black 0.000 1.000 1.000 0.000 20 20
-F left_black 1.000 1.000 0.000 0.000 -16 40
-F right_black 0.000 0.000 1.000 1.000 40 -16
-F outer_left 1.000 0.000 0.000 0.000 2 38
-F outer_right 0.000 0.000 0.000 1.000 38 2
-F inner_left 0.000 1.000 0.000 0.000 2 38
-F inner_right 0.000 0.000 1.000 0.000 38 2
-F soft_left 0.400 0.800 0.100 0.000 1 39
-F soft_right 0.000 0.100 0.800 0.400 39 1
+F name left middle right left_ticks right_ticks
+F all_white 0.000 0.000 0.000 12 -12
+F all_black 1.000 1.000 1.000 20 20
+F left 1.000 0.000 0.000 2 38
+F middle 0.000 1.000 0.000 20 20
+F right 0.000 0.000 1.000 38 2
+F soft_left 0.800 0.200 0.000 6 34
+F soft_right 0.000 0.200 0.800 34 6
+F balanced_edge 0.200 1.000 0.200 20 20
 ```
 
-The default build is telemetry-only. It reads four QTI sensors with
+The default build is telemetry-only. It reads three QTI sensors with
 `high(pin); pause(1); rc_time(pin, 1)`, normalizes each reading to the sim
 polarity as integer `0..1000`, runs a small policy-shaped stub, and prints:
 
 ```text
-S raw0 raw1 raw2 raw3 obs0 obs1 obs2 obs3 left right
+S raw0 raw1 raw2 obs0 obs1 obs2 left right
 ```
 
 Default sensor order and pins are:
 
 ```text
-obs[0] outer_left   P7
-obs[1] inner_left   P6
-obs[2] inner_right  P5
-obs[3] outer_right  P4
+obs[0] left    P7
+obs[1] middle  P6
+obs[2] right   P5
 ```
 
 Override pin or calibration values at build time with environment variables:
 
 ```text
-QTI_OUTER_LEFT_PIN=...
-QTI_INNER_LEFT_PIN=...
-QTI_INNER_RIGHT_PIN=...
-QTI_OUTER_RIGHT_PIN=...
+QTI_LEFT_PIN=...
+QTI_MIDDLE_PIN=...
+QTI_RIGHT_PIN=...
 QTI_WHITE_TIME=...
 QTI_BLACK_TIME=...
 QTI_THRESHOLD_Q1000=...
@@ -1449,7 +1503,8 @@ V1 is done when:
 - `ocean/line_follow` builds as a native PufferLib C env.
 - The env can train and render locally on g240.
 - A trained small policy follows randomized held-out sim tracks.
-- The policy input is exactly four normalized QTI RC-decay observations.
+- The policy input is exactly three normalized QTI RC-decay observations:
+  `[left, middle, right]`.
 - The policy output is exactly two continuous normalized wheel-speed actions.
 - There is a documented export path from PufferLib weights to robot-side C data.
 - There is a robot-side harness that reads QTI sensors and executes the same

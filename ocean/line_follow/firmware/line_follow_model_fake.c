@@ -12,9 +12,9 @@
 
 #include "line_follow_model_weights.h"
 
-#define OBS_SIZE 4
+#define OBS_SIZE 3
 #ifndef HIDDEN_SIZE
-#define HIDDEN_SIZE 8
+#define HIDDEN_SIZE 4
 #endif
 #ifndef NUM_LAYERS
 #define NUM_LAYERS 0
@@ -22,7 +22,7 @@
 #define NUM_ACTIONS 2
 #define DECODER_SIZE 3
 #ifndef MAX_WHEEL_SPEED_MPS
-#define MAX_WHEEL_SPEED_MPS 0.010f
+#define MAX_WHEEL_SPEED_MPS 0.038f
 #endif
 #define COMMAND_DEADBAND 0.04f
 #define TIRE_DIAMETER_M 0.065f
@@ -57,7 +57,7 @@ static const float* take_aligned_weights(int count)
 {
   const float* out = &line_follow_model_weights[weight_idx];
   weight_idx += count;
-  weight_idx = (weight_idx + 7) & ~7;
+  weight_idx = (weight_idx + 3) & ~3;
   return out;
 }
 
@@ -136,27 +136,23 @@ static void forward_model(const float obs[OBS_SIZE], float actions[NUM_ACTIONS])
   (void)h;
   linear_forward(encoder_out, decoder_w, decoder_out, HIDDEN_SIZE, DECODER_SIZE);
 #endif
-  actions[0] = decoder_out[0];
-  actions[1] = decoder_out[1];
+  actions[0] = clampf_model(decoder_out[0], -1.0f, 1.0f);
+  actions[1] = clampf_model(decoder_out[1], -1.0f, 1.0f);
 }
 
 static int action_to_ticks(float action)
 {
   float clipped = clampf_model(action, -1.0f, 1.0f);
+  float unit = 0.5f * (clipped + 1.0f);
   float mps;
   float ticks;
 
-  if(clipped < 0.0f)
+  if(unit < COMMAND_DEADBAND)
   {
-    clipped = 0.0f;
+    unit = 0.0f;
   }
 
-  if(fabsf(clipped) < COMMAND_DEADBAND)
-  {
-    clipped = 0.0f;
-  }
-
-  mps = clipped * MAX_WHEEL_SPEED_MPS;
+  mps = unit * MAX_WHEEL_SPEED_MPS;
   ticks = (mps / (LINE_FOLLOW_PI * TIRE_DIAMETER_M)) * TICKS_PER_REV;
   if(ticks >= 0.0f)
   {
@@ -214,8 +210,6 @@ static void run_case(const FakeCase* test_case)
   print(" ");
   print_q1000(test_case->obs_q1000[2]);
   print(" ");
-  print_q1000(test_case->obs_q1000[3]);
-  print(" ");
   print_float3(actions[0]);
   print(" ");
   print_float3(actions[1]);
@@ -226,17 +220,14 @@ int main(void)
 {
   int i;
   FakeCase cases[] = {
-    {"all_white",    {0,    0,    0,    0}},
-    {"all_black",    {1000, 1000, 1000, 1000}},
-    {"center_black", {0,    1000, 1000, 0}},
-    {"left_black",   {1000, 1000, 0,    0}},
-    {"right_black",  {0,    0,    1000, 1000}},
-    {"outer_left",   {1000, 0,    0,    0}},
-    {"outer_right",  {0,    0,    0,    1000}},
-    {"inner_left",   {0,    1000, 0,    0}},
-    {"inner_right",  {0,    0,    1000, 0}},
-    {"soft_left",    {400,  800,  100,  0}},
-    {"soft_right",   {0,    100,  800,  400}},
+    {"all_white",    {0,    0,    0}},
+    {"all_black",    {1000, 1000, 1000}},
+    {"left",         {1000, 0,    0}},
+    {"middle",       {0,    1000, 0}},
+    {"right",        {0,    0,    1000}},
+    {"soft_left",    {800,  200,  0}},
+    {"soft_right",   {0,    200,  800}},
+    {"balanced_edge", {200, 1000, 200}},
   };
   int num_cases = sizeof(cases) / sizeof(cases[0]);
 
@@ -259,10 +250,10 @@ int main(void)
   print("raw_floats=%d padded_floats=%d\n",
       LINE_FOLLOW_MODEL_RAW_FLOATS, LINE_FOLLOW_MODEL_PADDED_FLOATS);
   print("hidden_size=%d num_layers=%d\n", HIDDEN_SIZE, NUM_LAYERS);
-  print("scale action[-1,1] -> +/-%d mm/s, tire=65 mm, ticks/rev=64\n",
+  print("scale action[-1,1] -> wheel [0,%d] mm/s, tire=65 mm, ticks/rev=64\n",
       (int)(MAX_WHEEL_SPEED_MPS * 1000.0f + 0.5f));
   print("no QTI reads, no drive output, MinGRU state reset per row\n");
-  print("M name obs0 obs1 obs2 obs3 action0 action1 left right\n");
+  print("M name left middle right action0 action1 left_ticks right_ticks\n");
 
   for(i = 0; i < num_cases; i++)
   {

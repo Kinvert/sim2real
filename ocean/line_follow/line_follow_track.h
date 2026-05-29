@@ -128,6 +128,22 @@ static inline bool track_in_bounds(const LineFollowTrack* track, float bounds_m)
     return true;
 }
 
+static inline bool track_mirror_y(LineFollowTrack* track) {
+    for (int i = 0; i < track->sample_count; i++) {
+        track->samples[i].y = -track->samples[i].y;
+    }
+    return track_finalize(track);
+}
+
+static inline bool track_reverse(LineFollowTrack* track) {
+    for (int i = 0, j = track->sample_count - 1; i < j; i++, j--) {
+        LineFollowTrackSample tmp = track->samples[i];
+        track->samples[i] = track->samples[j];
+        track->samples[j] = tmp;
+    }
+    return track_finalize(track);
+}
+
 static inline bool generate_straight(LineFollowTrack* track, float length_m,
         float line_width_m, float bounds_m) {
     length_m = track_clampf(length_m, 0.2f, 2.0f * bounds_m);
@@ -233,7 +249,7 @@ static inline bool generate_track(LineFollowTrack* track, unsigned int* rng,
         int family, float line_width_m, float bounds_m) {
     int chosen = family;
     if (chosen == LINE_FOLLOW_TRACK_RANDOM) {
-        chosen = (int)(rand_r(rng) % 4);
+        chosen = 1 + (int)(rand_r(rng) % 3);
     }
 
     bool ok = false;
@@ -254,8 +270,21 @@ static inline bool generate_track(LineFollowTrack* track, unsigned int* rng,
         ok = generate_oval(track, rx, ry, line_width_m, bounds_m);
     }
 
-    if (!ok) {
+    if (!ok && family == LINE_FOLLOW_TRACK_RANDOM) {
+        ok = generate_s_curve(track, 0.36f, 0.04f, line_width_m, bounds_m);
+    }
+
+    if (!ok && family != LINE_FOLLOW_TRACK_RANDOM) {
         ok = generate_straight(track, bounds_m * 1.2f, line_width_m, bounds_m);
+    }
+    if (ok && family == LINE_FOLLOW_TRACK_RANDOM) {
+        if ((rand_r(rng) & 1u) != 0u) {
+            ok = track_mirror_y(track);
+        }
+        if (ok && (rand_r(rng) & 1u) != 0u) {
+            ok = track_reverse(track);
+        }
+        ok = ok && track_in_bounds(track, bounds_m);
     }
     return ok;
 }

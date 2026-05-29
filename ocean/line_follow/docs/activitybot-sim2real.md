@@ -17,8 +17,9 @@ The practical path is:
    [src/puffernet.h](src/puffernet.h)).
 3. Convert that flat weight file into either a compact C header or a raw SD-card
    binary with a tiny Propeller C inference function.
-4. On the ActivityBot, read four QTI line sensors, run the policy at a modest
-   control rate, and call `drive_speed(left_ticks_per_sec, right_ticks_per_sec)`
+4. On the ActivityBot, read the three active QTI line sensors `[P7, P6, P5]`,
+   run the policy at a modest control rate, and call
+   `drive_speed(left_ticks_per_sec, right_ticks_per_sec)`
    from `abdrive360.h` ([ActivityBot 360 calibration / drive docs](https://learn.parallax.com/courses/propeller-c-programming-with-the-activitybot-360/lessons/calibrate-the-activitybot-360/),
    [abdrive360.h source](https://raw.githubusercontent.com/parallaxinc/Simple-Libraries/master/Learn/Simple%20Libraries/Robotics/ActivityBot360/libabdrive360/abdrive360.h)).
 
@@ -269,16 +270,18 @@ agent count, and RNG fields in the expected shape ([ocean/minimal/minimal.h](oce
 For a line follower, this maps naturally:
 
 ```c
-#define OBS_SIZE 4
-#define NUM_ATNS 1
-#define ACT_SIZES {7}
+#define OBS_SIZE 3
+#define NUM_ATNS 2
+#define ACT_SIZES {1, 1}
 #define OBS_TENSOR_T FloatTensor
 ```
 
-The four observations should be normalized QTI RC-decay readings. Digital QTI
-states are still useful for debugging and heuristic baselines, but they are a
-thresholded view of the underlying sensor, not the only real signal available.
-The seven actions can map to wheel speed pairs.
+The current policy observations are three normalized QTI RC-decay readings:
+`[left, middle, right]`. Firmware reads them from `[P7, P6, P5]`; P4/far-right
+is intentionally ignored in this branch. Digital QTI states are still useful for
+debugging and heuristic baselines, but they are a thresholded view of the
+underlying sensor, not the only real signal available. The two continuous
+actions map to left/right wheel speed commands.
 
 ## Proposed Line-Follower Environment
 
@@ -289,10 +292,11 @@ Use a 2D differential-drive simulation:
 - Track: centerline spline or polyline with configurable tape width.
 - Robot: pose `(x, y, theta)`, left/right wheel velocities, wheelbase, wheel
   radius, max ticks per second.
-- Sensors: four sample points fixed to the robot body, ordered
-  `[outer_left, inner_left, inner_right, outer_right]`.
+- Sensors: three sample points fixed to the robot body, ordered
+  `[left, middle, right]`, with lateral offsets `[+20 mm, 0 mm, -20 mm]`.
 - Sensor output: local reflectance mapped to a capacitor decay time, then
   normalized to `[0, 1]` using per-sensor white/black calibration values.
+- Policy input: `[left, middle, right]` for the current small deployment model.
 
 This matches the QTI kit's real setup: Parallax's QTI Line Follower AppKit mounts
 three or four QTI sensors under the robot chassis, and Parallax documents the
@@ -306,13 +310,13 @@ for black/white line following
 
 ### Observations
 
-Start with exactly the real scalar sensor interface:
+The hardware scalar sensor interface is normalized in physical order and passed
+directly to the policy:
 
 ```text
-obs[0] = outer_left_qti_darkness
-obs[1] = inner_left_qti_darkness
-obs[2] = inner_right_qti_darkness
-obs[3] = outer_right_qti_darkness
+obs[0] = left_qti_darkness    (P7, +20 mm lateral)
+obs[1] = middle_qti_darkness  (P6,   0 mm lateral)
+obs[2] = right_qti_darkness   (P5, -20 mm lateral)
 ```
 
 Polarity should be:
@@ -537,9 +541,9 @@ Recommended first implementation:
 
 ```text
 policy.h
-  #define OBS_SIZE 4
-  #define HIDDEN_SIZE 8 or 16
-  #define NUM_ACTIONS 7
+  #define OBS_SIZE 3
+  #define HIDDEN_SIZE 4
+  #define NUM_ACTIONS 2
   static const int8_t encoder_w[HIDDEN_SIZE][OBS_SIZE] = ...
   static const int8_t decoder_w[NUM_ACTIONS + 1][HIDDEN_SIZE] = ...
   static const int8_t mingru_w[3 * HIDDEN_SIZE][HIDDEN_SIZE] = ...
@@ -549,13 +553,13 @@ policy.h
 Then write fixed-point inference in C:
 
 ```text
-read 4 QTI RC-time values
+read 3 QTI RC-time values
 normalize to calibrated 0.0..1.0 fixed-point
 encoder matmul
-MinGRU update
-decoder matmul
-argmax action logits
-drive_speed(left[action], right[action])
+MinGRU update if NUM_LAYERS > 0
+decoder matmul to continuous left/right actions
+clamp/scale actions to left/right wheel speeds
+drive_speed(left_ticks_per_second, right_ticks_per_second)
 ```
 
 If the C header makes the compiled program too large, store the same arrays in a
