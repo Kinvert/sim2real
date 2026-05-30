@@ -33,6 +33,30 @@
 #define TIRE_DIAMETER_M 0.065f
 #define TICKS_PER_REV 64.0f
 #define LINE_FOLLOW_PI 3.14159265358979323846f
+#ifndef COMMAND_DEADBAND_Q1000
+#define COMMAND_DEADBAND_Q1000 ((int)(COMMAND_DEADBAND * 1000.0f + 0.5f))
+#endif
+#ifndef MAX_WHEEL_TICKS_PER_SEC_Q1000
+#define MAX_WHEEL_TICKS_PER_SEC_Q1000 ((int)(((MAX_WHEEL_SPEED_MPS / (LINE_FOLLOW_PI * TIRE_DIAMETER_M)) * TICKS_PER_REV * 1000.0f) + 0.5f))
+#endif
+
+#define LINE_FOLLOW_INFERENCE_FULL 0
+#define LINE_FOLLOW_INFERENCE_FOLDED_FLOAT 1
+#define LINE_FOLLOW_INFERENCE_FIXED 2
+#ifndef LINE_FOLLOW_INFERENCE_MODE
+#if NUM_LAYERS == 0 && LINE_FOLLOW_MODEL_FOLDED_SUPPORTED
+#define LINE_FOLLOW_INFERENCE_MODE LINE_FOLLOW_INFERENCE_FIXED
+#else
+#define LINE_FOLLOW_INFERENCE_MODE LINE_FOLLOW_INFERENCE_FULL
+#endif
+#endif
+
+#if LINE_FOLLOW_INFERENCE_MODE < LINE_FOLLOW_INFERENCE_FULL || LINE_FOLLOW_INFERENCE_MODE > LINE_FOLLOW_INFERENCE_FIXED
+#error "LINE_FOLLOW_INFERENCE_MODE must be 0=full, 1=folded-float, or 2=fixed"
+#endif
+#if LINE_FOLLOW_INFERENCE_MODE != LINE_FOLLOW_INFERENCE_FULL && !(NUM_LAYERS == 0 && LINE_FOLLOW_MODEL_FOLDED_SUPPORTED)
+#error "folded inference requires NUM_LAYERS=0 and a folded model header"
+#endif
 
 typedef struct {
   const char* name;
@@ -50,12 +74,31 @@ static float combined[3 * HIDDEN_SIZE];
 static float mingru_out[HIDDEN_SIZE];
 static float decoder_out[DECODER_SIZE];
 
+static int align4_int(int value)
+{
+  return (value + 3) & ~3;
+}
+
 static int expected_raw_float_count(void)
 {
-  return HIDDEN_SIZE * OBS_SIZE
-    + DECODER_SIZE * HIDDEN_SIZE
-    + NUM_ACTIONS
-    + NUM_LAYERS * 3 * HIDDEN_SIZE * HIDDEN_SIZE;
+  int index = 0;
+  int layer;
+  index += HIDDEN_SIZE * OBS_SIZE;
+  index = align4_int(index);
+  index += DECODER_SIZE * HIDDEN_SIZE;
+  index = align4_int(index);
+  index += NUM_ACTIONS;
+#if NUM_LAYERS > 0
+  index = align4_int(index);
+  for(layer = 0; layer < NUM_LAYERS; layer++)
+  {
+    index += 3 * HIDDEN_SIZE * HIDDEN_SIZE;
+    index = align4_int(index);
+  }
+#else
+  (void)layer;
+#endif
+  return index;
 }
 
 static const float* take_aligned_weights(int count)
@@ -69,11 +112,13 @@ static const float* take_aligned_weights(int count)
 static void init_model(void)
 {
   weight_idx = 0;
+#if LINE_FOLLOW_INFERENCE_MODE == LINE_FOLLOW_INFERENCE_FULL
   encoder_w = take_aligned_weights(HIDDEN_SIZE * OBS_SIZE);
   decoder_w = take_aligned_weights(DECODER_SIZE * HIDDEN_SIZE);
   (void)take_aligned_weights(NUM_ACTIONS);
 #if NUM_LAYERS > 0
   mingru_w = take_aligned_weights(3 * HIDDEN_SIZE * HIDDEN_SIZE);
+#endif
 #endif
 }
 
@@ -98,6 +143,22 @@ static float clampf_model(float value, float lo, float hi)
   return value;
 }
 
+static int clamp_int(int value, int lo, int hi)
+{
+  if(value < lo) return lo;
+  if(value > hi) return hi;
+  return value;
+}
+
+static int round_div_int(int numerator, int denominator)
+{
+  if(numerator >= 0)
+  {
+    return (numerator + denominator / 2) / denominator;
+  }
+  return -((-numerator + denominator / 2) / denominator);
+}
+
 static void linear_forward(const float* input, const float* weights,
     float* output, int input_dim, int output_dim)
 {
@@ -118,6 +179,11 @@ static void forward_model(const float obs[OBS_SIZE], float actions[NUM_ACTIONS])
 {
   int h;
 
+#if LINE_FOLLOW_INFERENCE_MODE == LINE_FOLLOW_INFERENCE_FOLDED_FLOAT
+  (void)h;
+  linear_forward(obs, line_follow_model_folded_action_w,
+      actions, OBS_SIZE, NUM_ACTIONS);
+#else
   linear_forward(obs, encoder_w, encoder_out, OBS_SIZE, HIDDEN_SIZE);
 #if NUM_LAYERS > 0
   linear_forward(encoder_out, mingru_w, combined, HIDDEN_SIZE, 3 * HIDDEN_SIZE);
@@ -143,6 +209,30 @@ static void forward_model(const float obs[OBS_SIZE], float actions[NUM_ACTIONS])
 #endif
   actions[0] = clampf_model(decoder_out[0], -1.0f, 1.0f);
   actions[1] = clampf_model(decoder_out[1], -1.0f, 1.0f);
+#endif
+  actions[0] = clampf_model(actions[0], -1.0f, 1.0f);
+  actions[1] = clampf_model(actions[1], -1.0f, 1.0f);
+}
+
+static void forward_model_fixed(const int obs_q1000[OBS_SIZE],
+    int action_fixed[NUM_ACTIONS], float actions[NUM_ACTIONS])
+{
+  int action;
+  for(action = 0; action < NUM_ACTIONS; action++)
+  {
+    int i;
+    int total = 0;
+    for(i = 0; i < OBS_SIZE; i++)
+    {
+      total += obs_q1000[i]
+        * line_follow_model_folded_action_w_q[action * OBS_SIZE + i];
+    }
+    action_fixed[action] = clamp_int(
+        round_div_int(total, 1000),
+        -LINE_FOLLOW_MODEL_FIXED_SCALE, LINE_FOLLOW_MODEL_FIXED_SCALE);
+    actions[action] = (float)action_fixed[action]
+      / (float)LINE_FOLLOW_MODEL_FIXED_SCALE;
+  }
 }
 
 static int action_to_ticks(float action)
@@ -184,6 +274,33 @@ static int action_to_ticks(float action)
   return rounded;
 }
 
+static int action_fixed_to_ticks(int action_fixed)
+{
+  int unit = clamp_int(action_fixed,
+      -LINE_FOLLOW_MODEL_FIXED_SCALE, LINE_FOLLOW_MODEL_FIXED_SCALE);
+  int rounded;
+  int min_ticks = MIN_DRIVE_TICKS_PER_SEC;
+  int max_ticks = (MAX_WHEEL_TICKS_PER_SEC_Q1000 + 500) / 1000;
+
+  if(unit < 0)
+  {
+    unit = 0;
+  }
+
+  if(unit < (COMMAND_DEADBAND_Q1000 * LINE_FOLLOW_MODEL_FIXED_SCALE + 500) / 1000)
+  {
+    unit = 0;
+  }
+
+  rounded = round_div_int(unit * MAX_WHEEL_TICKS_PER_SEC_Q1000,
+      LINE_FOLLOW_MODEL_FIXED_SCALE * 1000);
+  if(min_ticks < 0) min_ticks = 0;
+  if(max_ticks < 0) max_ticks = 0;
+  if(min_ticks > max_ticks) min_ticks = max_ticks;
+  if(rounded < min_ticks) return min_ticks;
+  return rounded;
+}
+
 static void print_q1000(int value)
 {
   int clipped = value;
@@ -212,10 +329,18 @@ static void run_case(const FakeCase* test_case)
 {
   float obs[OBS_SIZE];
   float actions[NUM_ACTIONS];
+  int action_fixed[NUM_ACTIONS] = {0, 0};
   int left_ticks;
   int right_ticks;
   int i;
 
+#if LINE_FOLLOW_INFERENCE_MODE == LINE_FOLLOW_INFERENCE_FIXED
+  (void)obs;
+  reset_state();
+  forward_model_fixed(test_case->obs_q1000, action_fixed, actions);
+  left_ticks = action_fixed_to_ticks(action_fixed[0]);
+  right_ticks = action_fixed_to_ticks(action_fixed[1]);
+#else
   for(i = 0; i < OBS_SIZE; i++)
   {
     obs[i] = (float)test_case->obs_q1000[i] / 1000.0f;
@@ -225,6 +350,7 @@ static void run_case(const FakeCase* test_case)
   forward_model(obs, actions);
   left_ticks = action_to_ticks(actions[0]);
   right_ticks = action_to_ticks(actions[1]);
+#endif
 
   print("M %s ", test_case->name);
   print_q1000(test_case->obs_q1000[0]);
@@ -256,11 +382,18 @@ int main(void)
 
   low(26);
   low(27);
-  if(LINE_FOLLOW_MODEL_RAW_FLOATS != expected_raw_float_count())
+  if(LINE_FOLLOW_MODEL_RAW_FLOATS != expected_raw_float_count()
+      || LINE_FOLLOW_MODEL_OBS_SIZE != OBS_SIZE
+      || LINE_FOLLOW_MODEL_HIDDEN_SIZE != HIDDEN_SIZE
+      || LINE_FOLLOW_MODEL_NUM_LAYERS != NUM_LAYERS
+      || LINE_FOLLOW_MODEL_NUM_ACTIONS != NUM_ACTIONS)
   {
     print("\nLINE_FOLLOW_MODEL_FAKE shape mismatch\n");
     print("raw_floats=%d expected=%d hidden_size=%d num_layers=%d\n",
         LINE_FOLLOW_MODEL_RAW_FLOATS, expected_raw_float_count(), HIDDEN_SIZE, NUM_LAYERS);
+    print("header obs=%d hidden=%d layers=%d actions=%d\n",
+        LINE_FOLLOW_MODEL_OBS_SIZE, LINE_FOLLOW_MODEL_HIDDEN_SIZE,
+        LINE_FOLLOW_MODEL_NUM_LAYERS, LINE_FOLLOW_MODEL_NUM_ACTIONS);
     while(1)
     {
       pause(1000);
@@ -272,7 +405,9 @@ int main(void)
   print("checkpoint=%s\n", line_follow_model_checkpoint);
   print("raw_floats=%d padded_floats=%d\n",
       LINE_FOLLOW_MODEL_RAW_FLOATS, LINE_FOLLOW_MODEL_PADDED_FLOATS);
-  print("hidden_size=%d num_layers=%d\n", HIDDEN_SIZE, NUM_LAYERS);
+  print("hidden_size=%d num_layers=%d inference_mode=%d folded_supported=%d fixed_scale=%d\n",
+      HIDDEN_SIZE, NUM_LAYERS, LINE_FOLLOW_INFERENCE_MODE,
+      LINE_FOLLOW_MODEL_FOLDED_SUPPORTED, LINE_FOLLOW_MODEL_FIXED_SCALE);
   print("scale policy wheels floor to %d ticks/s, action=1 -> %d mm/s, tire=65 mm, ticks/rev=64\n",
       (int)(MIN_DRIVE_TICKS_PER_SEC), (int)(MAX_WHEEL_SPEED_MPS * 1000.0f + 0.5f));
   print("no QTI reads, no drive output, MinGRU state reset per row\n");

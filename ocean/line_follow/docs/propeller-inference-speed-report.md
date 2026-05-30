@@ -400,8 +400,10 @@ pause(LINE_FOLLOW_LOOP_MS);
 
 at the end of every loop. Older builds used `firmware_loop_ms=25`, which meant
 every loop waited 25 ms after the work was already finished. Current line-follow
-firmware defaults to `firmware_loop_ms=0`; the measured H8/L0 three-sensor loop
-is about 24 ms with sparse telemetry.
+firmware defaults to `firmware_loop_ms=0`; the old H8/L0 three-sensor float
+loop was about 24 ms with sparse telemetry. The folded fixed-point H8/L0 live
+drive loop measured about 6.4 ms p50 and 7.3 ms p95 with motors enabled, no SD
+logging, and sparse host-timestamp telemetry.
 
 Better control-loop behavior:
 

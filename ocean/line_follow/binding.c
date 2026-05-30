@@ -82,12 +82,11 @@ void my_init(Env* env, Dict* kwargs) {
 
 void my_log(Log* log, Dict* out) {
     dict_set(out, "perf", log->perf);
+    dict_set(out, "base_perf", log->base_perf);
+    dict_set(out, "min_drive_speed_score", log->min_drive_speed_score);
     dict_set(out, "score", log->score);
     dict_set(out, "progress_frac", log->progress_frac);
-    dict_set(out, "distance_progress_frac", log->distance_progress_frac);
-    dict_set(out, "progress_m", log->progress_m);
     dict_set(out, "effective_progress_m", log->effective_progress_m);
-    dict_set(out, "center_path_m", log->center_path_m);
     dict_set(out, "path_efficiency", log->path_efficiency);
     dict_set(out, "episode_return", log->episode_return);
     dict_set(out, "episode_length", log->episode_length);
@@ -95,12 +94,14 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "accuracy", log->accuracy);
     dict_set(out, "checkpoint_accuracy", log->checkpoint_accuracy);
     dict_set(out, "checkpoints", log->checkpoints);
-    dict_set(out, "target_checkpoints", log->target_checkpoints);
     dict_set(out, "progress_target_m", log->progress_target_m);
     dict_set(out, "avg_forward_speed_mps", log->avg_forward_speed_mps);
     dict_set(out, "avg_speed_frac", log->avg_speed_frac);
     dict_set(out, "idle_frac", log->idle_frac);
     dict_set(out, "turn_outer_speed_frac", log->turn_outer_speed_frac);
+    dict_set(out, "qti_no_black_frac", log->qti_no_black_frac);
+    dict_set(out, "qti_weak_line_frac", log->qti_weak_line_frac);
+    dict_set(out, "qti_pair_weak_frac", log->qti_pair_weak_frac);
     dict_set(out, "negative_action_frac", log->negative_action_frac);
     dict_set(out, "action_bound_violation", log->action_bound_violation);
     dict_set(out, "raw_action_abs", log->raw_action_abs);
@@ -108,8 +109,6 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "terminal_lost_line", log->terminal_lost_line);
     dict_set(out, "terminal_too_far", log->terminal_too_far);
     dict_set(out, "terminal_track_complete", log->terminal_track_complete);
-    dict_set(out, "terminal_negative", log->terminal_negative);
     dict_set(out, "terminal_action_bound", log->terminal_action_bound);
     dict_set(out, "terminal_success", log->terminal_success);
-    dict_set(out, "n", log->n);
 }

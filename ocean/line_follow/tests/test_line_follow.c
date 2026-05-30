@@ -128,11 +128,11 @@ static void test_measured_geometry_defaults(void) {
     memset(&env, 0, sizeof(env));
     set_defaults(&env);
 
-    expect_near(env.dt, 0.024f, 1e-6f, "nominal control period matches measured sparse Prop C loop timing");
-    expect_near(env.dt_min, 0.020f, 1e-6f, "minimum randomized control period is the measured lower bound");
-    expect_near(env.dt_max, 0.035f, 1e-6f, "maximum randomized control period covers slower real-loop jitter");
-    expect_near(env.max_wheel_speed_mps * env.dt, 0.002784f, 1e-6f,
-        "full-speed travel per decision matches the doubled speed window");
+    expect_near(env.dt, 0.0065f, 1e-6f, "nominal control period matches measured fixed-point Prop C loop timing");
+    expect_near(env.dt_min, 0.004f, 1e-6f, "minimum randomized control period follows measured body time");
+    expect_near(env.dt_max, 0.009f, 1e-6f, "maximum randomized control period covers measured real-loop jitter");
+    expect_near(env.max_wheel_speed_mps * env.dt, 0.000754f, 1e-6f,
+        "full-speed travel per decision matches the fixed-point deployment window");
     expect_true(env.model_dt_enabled == 1, "model-aware dt scaling is enabled by default");
     expect_true(env.policy_hidden_size == 8, "default policy timing hidden size matches config default");
     expect_true(env.policy_num_layers == 0, "default policy timing feed-forward layer count matches config default");
@@ -221,7 +221,7 @@ static void test_episode_dt_randomization(void) {
     float first = -1.0f;
     for (int i = 0; i < 64; i++) {
         randomize_episode_params(&env);
-        expect_true(env.episode_dt >= 0.020f && env.episode_dt <= 0.035f,
+        expect_true(env.episode_dt >= 0.004f && env.episode_dt <= 0.009f,
             "episode dt samples inside configured range");
         if (i == 0) {
             first = env.episode_dt;
@@ -250,9 +250,9 @@ static void test_model_timing_penalizes_larger_policy(void) {
     memset(&env, 0, sizeof(env));
     set_defaults(&env);
     apply_model_timing(&env);
-    expect_near(env.dt, 0.024f, 1e-6f, "H8 feed-forward timing matches measured three-sensor Prop C loop");
-    expect_near(env.dt_min, 0.020f, 1e-5f, "H8 feed-forward timing preserves min ratio");
-    expect_near(env.dt_max, 0.035f, 1e-5f, "H8 feed-forward timing preserves max ratio");
+    expect_near(env.dt, 0.0065f, 1e-6f, "H8 feed-forward timing matches measured fixed-point Prop C loop");
+    expect_near(env.dt_min, 0.004f, 1e-5f, "H8 feed-forward timing preserves min ratio");
+    expect_near(env.dt_max, 0.009f, 1e-5f, "H8 feed-forward timing preserves max ratio");
     expect_true(env.max_steps == 800, "H8 feed-forward keeps the configured wall-clock horizon");
     expect_true(env.lost_line_limit == 16, "H8 feed-forward keeps the configured lost-line grace");
 
@@ -262,18 +262,18 @@ static void test_model_timing_penalizes_larger_policy(void) {
     env.policy_num_layers = 1;
     apply_model_timing(&env);
     expect_near(env.dt, 0.188f, 1e-6f, "H8 recurrent timing uses measured slower loop");
-    expect_near(env.dt_min, 0.156667f, 1e-5f, "H8 recurrent timing scales min dt");
-    expect_near(env.dt_max, 0.274167f, 1e-5f, "H8 recurrent timing scales max dt");
-    expect_true(env.max_steps == 103, "H8 recurrent reduces max steps to preserve wall-clock horizon");
-    expect_true(env.lost_line_limit == 3, "H8 recurrent reduces lost-line grace to preserve wall-clock time");
+    expect_near(env.dt_min, 0.115692f, 1e-5f, "H8 recurrent timing scales min dt");
+    expect_near(env.dt_max, 0.260308f, 1e-5f, "H8 recurrent timing scales max dt");
+    expect_true(env.max_steps == 28, "H8 recurrent reduces max steps to preserve wall-clock horizon");
+    expect_true(env.lost_line_limit == 1, "H8 recurrent reduces lost-line grace to preserve wall-clock time");
 
     memset(&env, 0, sizeof(env));
     set_defaults(&env);
     env.policy_hidden_size = 4;
     env.policy_num_layers = 0;
     apply_model_timing(&env);
-    expect_near(env.dt, 0.020f, 1e-6f, "H4 feed-forward timing is faster than measured H8 Prop C loop");
-    expect_true(env.max_steps == 961, "H4 feed-forward gets more update steps for the same wall-clock horizon");
+    expect_near(env.dt, 0.0065f, 1e-6f, "H4 feed-forward timing matches folded fixed-point inference cost");
+    expect_true(env.max_steps == 800, "H4 feed-forward keeps the same folded-policy wall-clock horizon");
 }
 
 static void test_start_lateral_offset_samples_sensor_targets(void) {
@@ -285,18 +285,22 @@ static void test_start_lateral_offset_samples_sensor_targets(void) {
     env.episode_line_width_m = 0.0f;
     sensor_layout(&env);
 
-    bool seen[LINE_FOLLOW_OBS_SIZE] = {false};
-    const float targets[LINE_FOLLOW_OBS_SIZE] = {
+    bool seen[5] = {false};
+    const float targets[5] = {
         -env.sensor_lateral[LINE_FOLLOW_LEFT],
+        -0.5f * (env.sensor_lateral[LINE_FOLLOW_LEFT]
+            + env.sensor_lateral[LINE_FOLLOW_MIDDLE]),
         -env.sensor_lateral[LINE_FOLLOW_MIDDLE],
+        -0.5f * (env.sensor_lateral[LINE_FOLLOW_MIDDLE]
+            + env.sensor_lateral[LINE_FOLLOW_RIGHT]),
         -env.sensor_lateral[LINE_FOLLOW_RIGHT],
     };
 
-    for (int i = 0; i < 256; i++) {
+    for (int i = 0; i < 512; i++) {
         float offset = sample_start_lateral_offset(&env);
         expect_true(fabsf(offset) <= 0.025001f,
             "start sampler clamps lateral offset to twenty-five millimeters");
-        for (int j = 0; j < LINE_FOLLOW_OBS_SIZE; j++) {
+        for (int j = 0; j < 5; j++) {
             if (fabsf(offset - targets[j]) < 1e-6f) {
                 seen[j] = true;
             }
@@ -304,8 +308,10 @@ static void test_start_lateral_offset_samples_sensor_targets(void) {
     }
 
     expect_true(seen[0], "start sampler can place left sensor on line");
-    expect_true(seen[1], "start sampler can place middle sensor on line");
-    expect_true(seen[2], "start sampler can place right sensor on line");
+    expect_true(seen[1], "start sampler can place line between left and middle sensors");
+    expect_true(seen[2], "start sampler can place middle sensor on line");
+    expect_true(seen[3], "start sampler can place line between middle and right sensors");
+    expect_true(seen[4], "start sampler can place right sensor on line");
 }
 
 static void test_track_generation(void) {
@@ -411,8 +417,12 @@ static void test_perf_penalizes_centerline_error(void) {
     env.centerline_error = 0.0f;
     env.centerline_error_sum = 0.0f;
     add_log(&env);
-    expect_near(env.log.perf, 1.0f, 1e-6f,
-        "full accuracy-weighted progress gives full perf");
+    expect_near(env.log.base_perf, 1.0f, 1e-6f,
+        "full accuracy-weighted progress gives full base perf");
+    expect_near(env.log.min_drive_speed_score, 0.3f, 1e-6f,
+        "default six tick anti-stall floor gives 6/20 speed score");
+    expect_near(env.log.perf, 0.3f, 1e-6f,
+        "default perf is base perf scaled by the minimum drive speed score");
     expect_near(env.log.score, 0.0f, 1e-6f,
         "score logs raw episode return separately from perf");
     expect_near(env.log.progress_frac, 1.0f, 1e-6f,
@@ -435,6 +445,13 @@ static void test_perf_penalizes_centerline_error(void) {
         "centered straight progress has full path efficiency");
 
     memset(&env.log, 0, sizeof(env.log));
+    env.min_drive_ticks_per_sec = 20.0f;
+    add_log(&env);
+    expect_near(env.log.perf, 1.0f, 1e-6f,
+        "twenty tick minimum drive floor preserves full perf for a perfect episode");
+
+    memset(&env.log, 0, sizeof(env.log));
+    env.min_drive_ticks_per_sec = 6.0f;
     env.tick = 10;
     env.episode_progress = perf_target_progress_m(&env);
     env.effective_progress_m = 0.0f;

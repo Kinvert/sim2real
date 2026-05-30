@@ -67,11 +67,25 @@ static int mps_to_ticks(float mps) {
     return (int)lrintf(ticks);
 }
 
+static int align4_int(int value) {
+    return (value + 3) & ~3;
+}
+
 static int expected_raw_float_count(void) {
-    return HIDDEN_SIZE * OBS_SIZE
-        + (NUM_ACTIONS + 1) * HIDDEN_SIZE
-        + NUM_ACTIONS
-        + NUM_LAYERS * 3 * HIDDEN_SIZE * HIDDEN_SIZE;
+    int index = 0;
+    index += HIDDEN_SIZE * OBS_SIZE;
+    index = align4_int(index);
+    index += (NUM_ACTIONS + 1) * HIDDEN_SIZE;
+    index = align4_int(index);
+    index += NUM_ACTIONS;
+    if (NUM_LAYERS > 0) {
+        index = align4_int(index);
+        for (int layer = 0; layer < NUM_LAYERS; layer++) {
+            index += 3 * HIDDEN_SIZE * HIDDEN_SIZE;
+            index = align4_int(index);
+        }
+    }
+    return index;
 }
 
 static void reset_recurrent_state(PufferNet* net) {

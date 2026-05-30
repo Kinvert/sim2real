@@ -20,6 +20,7 @@
 #define LINE_FOLLOW_ACCURACY_ZERO_M 0.030f
 #define LINE_FOLLOW_REWARD_ZERO_M 0.015f
 #define LINE_FOLLOW_TICKS_PER_REV 64.0f
+#define LINE_FOLLOW_MIN_DRIVE_PERF_TARGET_TICKS 20.0f
 #define LINE_FOLLOW_LEFT 0
 #define LINE_FOLLOW_MIDDLE 1
 #define LINE_FOLLOW_RIGHT 2
@@ -27,6 +28,8 @@
 typedef struct Log Log;
 struct Log {
     float perf;
+    float base_perf;
+    float min_drive_speed_score;
     float score;
     float progress_frac;
     float distance_progress_frac;
@@ -46,6 +49,9 @@ struct Log {
     float avg_speed_frac;
     float idle_frac;
     float turn_outer_speed_frac;
+    float qti_no_black_frac;
+    float qti_weak_line_frac;
+    float qti_pair_weak_frac;
     float negative_action_frac;
     float action_bound_violation;
     float raw_action_abs;
@@ -89,6 +95,9 @@ struct LineFollow {
     int max_steps;
     int lost_line_steps;
     int idle_steps;
+    int qti_no_black_steps;
+    int qti_weak_line_steps;
+    int qti_pair_weak_steps;
     int negative_action_steps;
     int lost_line_limit;
     int track_family;
@@ -229,9 +238,9 @@ void set_defaults(LineFollow* env) {
     env->policy_num_layers = 0;
     env->model_dt_enabled = 1;
 
-    env->dt = 0.024f;
-    env->dt_min = 0.020f;
-    env->dt_max = 0.035f;
+    env->dt = 0.0065f;
+    env->dt_min = 0.004f;
+    env->dt_max = 0.009f;
     env->episode_dt = env->dt;
     env->max_wheel_speed_mps = 0.116f;
     env->wheel_base_m = 0.125f;
@@ -309,6 +318,9 @@ void init(LineFollow* env) {
     env->tick = 0;
     env->lost_line_steps = 0;
     env->idle_steps = 0;
+    env->qti_no_black_steps = 0;
+    env->qti_weak_line_steps = 0;
+    env->qti_pair_weak_steps = 0;
     env->negative_action_steps = 0;
     env->episode_return = 0.0f;
     env->episode_progress = 0.0f;
@@ -431,11 +443,22 @@ static inline float episode_checkpoint_accuracy(LineFollow* env) {
         : 0.0f;
 }
 
-static inline float episode_perf_score(LineFollow* env) {
+static inline float episode_progress_accuracy_perf_score(LineFollow* env) {
     float target = perf_target_progress_m(env);
     return target > 1e-6f
         ? clampf(env->effective_progress_m / target, 0.0f, 1.0f)
         : 0.0f;
+}
+
+static inline float episode_min_drive_speed_score(LineFollow* env) {
+    return clampf(
+        env->min_drive_ticks_per_sec / LINE_FOLLOW_MIN_DRIVE_PERF_TARGET_TICKS,
+        0.0f, 1.0f);
+}
+
+static inline float episode_perf_score(LineFollow* env) {
+    return episode_progress_accuracy_perf_score(env)
+        * episode_min_drive_speed_score(env);
 }
 
 void add_log(LineFollow* env) {
@@ -449,7 +472,9 @@ void add_log(LineFollow* env) {
     int target_checkpoints = perf_target_checkpoints(env);
     float progress_frac = episode_progress_frac(env);
     float checkpoint_accuracy = episode_checkpoint_accuracy(env);
-    float perf = episode_perf_score(env);
+    float base_perf = episode_progress_accuracy_perf_score(env);
+    float min_drive_speed_score = episode_min_drive_speed_score(env);
+    float perf = base_perf * min_drive_speed_score;
     float path_efficiency = env->center_path_m > 1e-6f
         ? clampf(env->episode_progress / env->center_path_m, 0.0f, 1.0f)
         : 0.0f;
@@ -465,6 +490,15 @@ void add_log(LineFollow* env) {
     float turn_outer_speed_frac = env->turn_step_count > 0
         ? env->turn_outer_speed_frac_sum / (float)env->turn_step_count
         : 0.0f;
+    float qti_no_black_frac = episode_length > 0.0f
+        ? (float)env->qti_no_black_steps / episode_length
+        : 0.0f;
+    float qti_weak_line_frac = episode_length > 0.0f
+        ? (float)env->qti_weak_line_steps / episode_length
+        : 0.0f;
+    float qti_pair_weak_frac = episode_length > 0.0f
+        ? (float)env->qti_pair_weak_steps / episode_length
+        : 0.0f;
     float negative_action_frac = episode_length > 0.0f
         ? (float)env->negative_action_steps / episode_length
         : 0.0f;
@@ -476,6 +510,8 @@ void add_log(LineFollow* env) {
         : 0.0f;
 
     env->log.perf += perf;
+    env->log.base_perf += base_perf;
+    env->log.min_drive_speed_score += min_drive_speed_score;
     env->log.score += env->episode_return;
     env->log.progress_frac += progress_frac;
     env->log.distance_progress_frac += distance_progress_frac;
@@ -495,6 +531,9 @@ void add_log(LineFollow* env) {
     env->log.avg_speed_frac += avg_speed_frac;
     env->log.idle_frac += idle_frac;
     env->log.turn_outer_speed_frac += turn_outer_speed_frac;
+    env->log.qti_no_black_frac += qti_no_black_frac;
+    env->log.qti_weak_line_frac += qti_weak_line_frac;
+    env->log.qti_pair_weak_frac += qti_pair_weak_frac;
     env->log.negative_action_frac += negative_action_frac;
     env->log.action_bound_violation += action_bound_violation;
     env->log.raw_action_abs += raw_action_abs;
@@ -540,10 +579,8 @@ static inline float estimate_policy_dt(int hidden_size, int num_layers) {
     int layers = num_layers > 0 ? num_layers : 0;
 
     if (layers == 0) {
-        if (h <= 2) return 0.018f;
-        if (h <= 4) return 0.020f;
-        if (h <= 8) return 0.024f;
-        return 0.024f + 0.003f * (float)(h - 8);
+        (void)h;
+        return 0.0065f;
     }
 
     if (h <= 2) return 0.070f;
@@ -686,17 +723,18 @@ static inline void sensor_layout(LineFollow* env) {
 }
 
 static inline float sample_start_lateral_offset(LineFollow* env) {
-    const int active_sensors[LINE_FOLLOW_OBS_SIZE] = {
-        LINE_FOLLOW_LEFT,
-        LINE_FOLLOW_MIDDLE,
-        LINE_FOLLOW_RIGHT,
+    const float target_offsets[] = {
+        -env->sensor_lateral[LINE_FOLLOW_LEFT],
+        -0.5f * (env->sensor_lateral[LINE_FOLLOW_LEFT]
+            + env->sensor_lateral[LINE_FOLLOW_MIDDLE]),
+        -env->sensor_lateral[LINE_FOLLOW_MIDDLE],
+        -0.5f * (env->sensor_lateral[LINE_FOLLOW_MIDDLE]
+            + env->sensor_lateral[LINE_FOLLOW_RIGHT]),
+        -env->sensor_lateral[LINE_FOLLOW_RIGHT],
     };
-    const int targets = LINE_FOLLOW_OBS_SIZE;
+    const int targets = (int)(sizeof(target_offsets) / sizeof(target_offsets[0]));
     int idx = (int)(rand_r(&env->rng) % targets);
-    float lateral_offset = 0.0f;
-    if (idx < LINE_FOLLOW_OBS_SIZE) {
-        lateral_offset = -env->sensor_lateral[active_sensors[idx]];
-    }
+    float lateral_offset = target_offsets[idx];
 
     float jitter = 0.25f * env->episode_line_width_m * rand_signed(&env->rng);
     float limit = fmaxf(env->start_lateral_offset_m, 0.0f);
@@ -826,6 +864,28 @@ void compute_observations(LineFollow* env) {
     env->observations[2] = env->sensor_obs[LINE_FOLLOW_RIGHT];
 }
 
+static inline void record_qti_domain_metrics(LineFollow* env) {
+    int black_count = 0;
+    int weak_count = 0;
+    for (int i = 0; i < LINE_FOLLOW_SENSOR_COUNT; i++) {
+        if (env->sensor_obs[i] >= env->qti_threshold) {
+            black_count += 1;
+        } else if (env->sensor_obs[i] > 0.05f) {
+            weak_count += 1;
+        }
+    }
+
+    if (black_count == 0) {
+        env->qti_no_black_steps += 1;
+        if (weak_count > 0) {
+            env->qti_weak_line_steps += 1;
+        }
+        if (weak_count >= 2) {
+            env->qti_pair_weak_steps += 1;
+        }
+    }
+}
+
 bool line_visible_to_sensor_array(LineFollow* env) {
     const int active_sensors[LINE_FOLLOW_OBS_SIZE] = {
         LINE_FOLLOW_LEFT,
@@ -881,6 +941,9 @@ void c_reset(LineFollow* env) {
     env->tick = 0;
     env->lost_line_steps = 0;
     env->idle_steps = 0;
+    env->qti_no_black_steps = 0;
+    env->qti_weak_line_steps = 0;
+    env->qti_pair_weak_steps = 0;
     env->negative_action_steps = 0;
     env->episode_return = 0.0f;
     env->episode_progress = 0.0f;
@@ -989,6 +1052,7 @@ void c_step(LineFollow* env) {
 
     env->tick += 1;
     compute_observations(env);
+    record_qti_domain_metrics(env);
     record_trajectory(env);
 
     LineFollowNearest nearest = nearest_track(&env->track, env->robot_x, env->robot_y);
@@ -1061,7 +1125,7 @@ void c_step(LineFollow* env) {
     bool track_complete = env->episode_progress + env->track_complete_margin_m
         >= env->track.length_m;
     bool done = timeout || lost_line || too_far || track_complete;
-    float success_quality = episode_perf_score(env);
+    float success_quality = episode_progress_accuracy_perf_score(env);
     bool success = (timeout || track_complete) && !lost_line && !too_far
         && env->idle_steps == 0 && success_quality > 0.0f;
 

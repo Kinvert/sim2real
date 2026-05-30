@@ -455,9 +455,9 @@ response.
 Current assumed sim control rate for the smaller model:
 
 ```text
-dt = 0.024 seconds
-dt_min = 0.020 seconds
-dt_max = 0.035 seconds
+dt = 0.0065 seconds
+dt_min = 0.004 seconds
+dt_max = 0.009 seconds
 ```
 
 This is not a pause inserted into PufferLib. It is the distance-integration time
@@ -472,12 +472,13 @@ During training, the env samples an episode-level `episode_dt` from
 `[dt_min, dt_max]` and uses that value for kinematic integration. The previous
 hidden-size-16 recurrent exported model measured about 476.6 ms/update; the
 hidden-size-8 recurrent model measured about 187.5 ms/update with the same
-requested 25 ms Propeller pause. After switching to three policy observations
-and hidden-size-8 with no recurrent layer, the RAM-only Propeller model measured
-about 24.0 ms/update with `LINE_FOLLOW_LOOP_MS=0` and amortized serial
-telemetry. That H8/L0 shape is the current default because the middle sensor
-removes the all-white centered-state ambiguity that broke the two-sensor
-feed-forward policy.
+requested 25 ms Propeller pause. The old three-observation H8/L0 float path
+measured about 24.0 ms/update with `LINE_FOLLOW_LOOP_MS=0` and amortized serial
+telemetry. After folding the feed-forward action head to a 2x3 fixed-point
+policy, the real robot measured about 6.4 ms/update with motors enabled, no SD
+logging, and sparse host-timestamp telemetry. That H8/L0 shape is the current
+default because the middle sensor removes the all-white centered-state
+ambiguity that broke the two-sensor feed-forward policy.
 
 The env applies model-aware timing before init when `model_dt_enabled = 1`.
 PufferLib syncs the selected `[policy] hidden_size` and `num_layers` into
@@ -485,9 +486,9 @@ PufferLib syncs the selected `[policy] hidden_size` and `num_layers` into
 the real control period from that model shape. Current estimates are:
 
 ```text
-H2/L0  ->  18 ms
-H4/L0  ->  20 ms
-H8/L0  ->  24 ms
+H2/L0  -> 6.5 ms
+H4/L0  -> 6.5 ms
+H8/L0  -> 6.5 ms
 H2/L1  ->  70 ms
 H4/L1  -> 105 ms
 H8/L1  -> 188 ms
@@ -498,12 +499,14 @@ When derived `dt` changes, `max_steps` and `lost_line_limit` are scaled
 inversely so larger/slower models do not receive extra wall-clock episode time
 or lost-line grace. The current `max_wheel_speed_mps = 0.116` is the doubled
 ActivityBot speed window: `action=0.5` is about `18 ticks/s`, and `action=1.0`
-is about `36 ticks/s`. At the default H8/L0 measured `dt=0.024`, full-speed
-travel is about `2.78 mm` per policy decision.
+is about `36 ticks/s`. At the default H8/L0 fixed-point measured `dt=0.0065`,
+full-speed travel is about `0.75 mm` per policy decision.
 `min_drive_ticks_per_sec = 6` applies a small anti-stall floor to policy-driven
 wheel commands, about `19.1 mm/s` with the measured 65 mm tires. This uses the
 first smooth slow drive probe; `2 ticks/s` moved inconsistently, `3 ticks/s`
 produced repeatable but weak encoder movement, and `6 ticks/s` was smoother.
+Sweeps may choose a fixed minimum floor per whole training run; logged `perf`
+favors higher floors up to `20 ticks/s`.
 `progress_reward_scale = 1.0`, `time_penalty = 0.005`, and
 `idle_penalty = 0.02` keep centered forward progress positive while making
 stopped or crawling policies lose reward. The env records centerline quality
@@ -765,14 +768,18 @@ progress. Each positive centerline-progress delta contributes:
 
 ```text
 effective_progress_m += track_progress_delta_m * accuracy_score
-perf = effective_progress_m / target_progress_m, clipped to 0..1
+base_perf = effective_progress_m / target_progress_m, clipped to 0..1
+min_drive_speed_score = min_drive_ticks_per_sec / 20, clipped to 0..1
+perf = base_perf * min_drive_speed_score
 ```
 
 `target_progress_m` is the smaller of track length and the physical distance
 available at max wheel speed over the episode horizon. Debug checkpoint counts
 still exist for telemetry, but they no longer pay reward. Training reward uses
 the signed score so blind forward progress after losing the line becomes
-negative rather than merely unrewarded.
+negative rather than merely unrewarded. The minimum-speed multiplier is for
+sweep/model selection only; terminal success bonuses still use `base_perf` so
+changing the run-level anti-stall floor does not silently reshape reward.
 
 Reward should use the true simulated state, not only what the QTI sensors can
 observe. For example, if the line is between the two right sensors, the policy
@@ -1052,8 +1059,9 @@ clamp negative wheel commands to non-reversing wheel speed and penalize the
 negative command amount. This old checkpoint predates the anti-stall floor;
 treat it as not drive-approved.
 
-That run predates the measured three-sensor timing target. Retrain before
-treating the current `dt=0.024` / architecture sweep config as evaluated.
+That run predates the measured fixed-point three-sensor timing target. Retrain
+before treating the current `dt=0.0065` / architecture sweep config as
+evaluated.
 
 The first `sim1` sweep after shrinking the deployable model plateaued near
 `env/perf=0.33`. Investigation found two measurement issues: reset was crediting
@@ -1144,9 +1152,9 @@ hidden_size = 8
 num_layers = 0
 
 [env]
-dt = 0.024  # measured H8/L0 three-sensor Prop C loop without per-tick serial printing
-dt_min = 0.020
-dt_max = 0.035
+dt = 0.0065  # measured folded fixed-point H8/L0 drive loop without SD logging
+dt_min = 0.004
+dt_max = 0.009
 policy_hidden_size = 8
 policy_num_layers = 0
 model_dt_enabled = 1
@@ -1161,8 +1169,10 @@ not swept by default; keep num_layers = 0 unless recurrence is deliberately test
 ```
 
 With `model_dt_enabled = 1`, those reference values keep the default H8/L0
-episode range at `dt = 0.024`, `dt_min = 0.020`, and `dt_max = 0.035`, while
-smaller or recurrent policies get their own estimated timing.
+episode range at `dt = 0.0065`, `dt_min = 0.004`, and `dt_max = 0.009`, while
+recurrent policies get their own estimated timing. Feed-forward policies share
+the same deployment timing because the firmware folds them to a fixed 2x3
+action policy.
 
 Initial deployment-focused sweeps should prefer:
 
