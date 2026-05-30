@@ -206,6 +206,7 @@ struct LineFollow {
     float line_width_segment_jitter_m;
     float line_edge_softness_m;
     float line_edge_softness_jitter_m;
+    float line_reflectance_noise;
     float episode_line_width_m;
     float episode_line_edge_softness_m;
     float track_bounds_m;
@@ -291,6 +292,7 @@ void set_defaults(LineFollow* env) {
     env->line_width_segment_jitter_m = 0.002f;
     env->line_edge_softness_m = 0.006f;
     env->line_edge_softness_jitter_m = 0.004f;
+    env->line_reflectance_noise = 0.12f;
     env->episode_line_width_m = env->line_width_m;
     env->episode_line_edge_softness_m = env->line_edge_softness_m;
     env->track_bounds_m = 1.0f;
@@ -697,6 +699,26 @@ static inline void jitter_episode_track_line_widths(LineFollow* env) {
     }
 }
 
+static inline void jitter_episode_track_reflectance(LineFollow* env) {
+    float amplitude = clampf(env->line_reflectance_noise, 0.0f, 0.35f);
+    if (amplitude <= 0.0f) {
+        return;
+    }
+
+    float reflectance = 1.0f - amplitude * rand01(&env->rng);
+    for (int i = 0; i < env->track.sample_count; i++) {
+        float target = 1.0f - amplitude * rand01(&env->rng);
+        reflectance = 0.85f * reflectance + 0.15f * target;
+        env->track.samples[i].black_reflectance = clampf(
+            reflectance, 1.0f - amplitude, 1.0f);
+    }
+}
+
+static inline void jitter_episode_track_samples(LineFollow* env) {
+    jitter_episode_track_line_widths(env);
+    jitter_episode_track_reflectance(env);
+}
+
 static inline void sensor_layout(LineFollow* env) {
     const float lateral[LINE_FOLLOW_SENSOR_COUNT] = {
         env->sensor_side_lateral_m,
@@ -847,8 +869,9 @@ void compute_observations(LineFollow* env) {
         LineFollowNearest nearest = nearest_track(&env->track, sx, sy);
         float coverage = line_coverage(
             nearest.signed_lateral_m, nearest.line_width_m, env->episode_line_edge_softness_m);
+        float darkness = coverage * clampf(nearest.black_reflectance, 0.0f, 1.0f);
         float raw = env->sensor_white_time[i]
-            + coverage * (env->sensor_black_time[i] - env->sensor_white_time[i]);
+            + darkness * (env->sensor_black_time[i] - env->sensor_white_time[i]);
         raw = raw * env->sensor_gain[i] + env->sensor_bias[i];
         if (env->sensor_noise_std > 0.0f) {
             raw += env->sensor_noise_std * rand_signed(&env->rng);
@@ -917,7 +940,7 @@ static inline bool generate_episode_track(LineFollow* env) {
     for (int i = 0; i < env->max_track_gen_attempts; i++) {
         if (generate_track(&env->track, &env->rng, env->track_family,
                 env->episode_line_width_m, env->track_bounds_m)) {
-            jitter_episode_track_line_widths(env);
+            jitter_episode_track_samples(env);
             return true;
         }
     }
@@ -925,14 +948,14 @@ static inline bool generate_episode_track(LineFollow* env) {
         bool ok = generate_s_curve(&env->track, 0.36f, 0.04f,
             env->episode_line_width_m, env->track_bounds_m);
         if (ok) {
-            jitter_episode_track_line_widths(env);
+            jitter_episode_track_samples(env);
         }
         return ok;
     }
     bool ok = generate_straight(&env->track, env->track_bounds_m * 1.2f,
         env->episode_line_width_m, env->track_bounds_m);
     if (ok) {
-        jitter_episode_track_line_widths(env);
+        jitter_episode_track_samples(env);
     }
     return ok;
 }
@@ -1172,6 +1195,12 @@ static inline Vector2 body_to_screen(LineFollow* env, float forward_m, float lat
     return world_to_screen(env, x, y, width, height, scale);
 }
 
+static inline Color line_color_for_reflectance(float black_reflectance) {
+    float weakness = 1.0f - clampf(black_reflectance, 0.0f, 1.0f);
+    unsigned char shade = (unsigned char)clampf(18.0f + 130.0f * weakness, 0.0f, 180.0f);
+    return (Color){shade, shade, shade, 255};
+}
+
 static inline void draw_body_rect(LineFollow* env, float forward_m, float lateral_m,
         float length_m, float width_m, int screen_width, int screen_height, float scale, Color color) {
     Vector2 center = body_to_screen(env, forward_m, lateral_m,
@@ -1215,12 +1244,17 @@ void c_render(LineFollow* env) {
         float line_width = 0.5f * (
             env->track.samples[i].line_width_m
             + env->track.samples[i + 1].line_width_m);
-        DrawLineEx(a, b, fmaxf(2.0f, line_width * scale), BLACK);
+        float reflectance = 0.5f * (
+            env->track.samples[i].black_reflectance
+            + env->track.samples[i + 1].black_reflectance);
+        DrawLineEx(a, b, fmaxf(2.0f, line_width * scale),
+            line_color_for_reflectance(reflectance));
     }
     for (int i = 0; i < env->track.sample_count; i++) {
         Vector2 p = world_to_screen(env,
             env->track.samples[i].x, env->track.samples[i].y, width, height, scale);
-        DrawCircleV(p, fmaxf(1.0f, 0.5f * env->track.samples[i].line_width_m * scale), BLACK);
+        DrawCircleV(p, fmaxf(1.0f, 0.5f * env->track.samples[i].line_width_m * scale),
+            line_color_for_reflectance(env->track.samples[i].black_reflectance));
     }
 
     for (int i = 1; i < env->trajectory_count; i++) {

@@ -18,7 +18,28 @@ def parse_row(line):
         step = int(parts[1])
     except ValueError:
         return None
-    if len(parts) >= 25:
+    if len(parts) in (22, 28):
+        row = {
+            "step": step,
+            "raw": [int(v) for v in parts[2:5]],
+            "obs": [int(v) for v in parts[11:14]],
+            "model_obs": [int(v) for v in parts[14:17]],
+            "action": [float(v) for v in parts[17:19]],
+            "ticks": [int(v) for v in parts[19:21]],
+            "dt_ms": int(parts[21]),
+        }
+        if len(parts) >= 28:
+            row.update(
+                {
+                    "period_us": int(parts[22]),
+                    "body_us": int(parts[23]),
+                    "qti_us": int(parts[24]),
+                    "policy_us": int(parts[25]),
+                    "drive_us": int(parts[26]),
+                    "qti_sample_us": int(parts[27]),
+                }
+            )
+    elif len(parts) >= 25:
         row = {
             "step": step,
             "raw": [int(v) for v in parts[2:6]],
@@ -29,15 +50,7 @@ def parse_row(line):
             "dt_ms": int(parts[24]),
         }
     else:
-        row = {
-            "step": step,
-            "raw": [int(v) for v in parts[2:5]],
-            "obs": [int(v) for v in parts[11:14]],
-            "model_obs": [int(v) for v in parts[14:17]],
-            "action": [float(v) for v in parts[17:19]],
-            "ticks": [int(v) for v in parts[19:21]],
-            "dt_ms": int(parts[21]),
-        }
+        return None
     if timestamp is not None:
         row["timestamp"] = timestamp
     return row
@@ -57,6 +70,16 @@ def percentile(values, pct):
 def summarize_column(rows, key, idx):
     values = [row[key][idx] for row in rows]
     return min(values), max(values), statistics.mean(values)
+
+
+def summarize_scalar(rows, key, label):
+    values = [row[key] for row in rows if key in row and row[key] > 0]
+    if values:
+        print(
+            f"{label} min={min(values)} p50={percentile(values, 50):.0f} "
+            f"p95={percentile(values, 95):.0f} max={max(values)} "
+            f"mean={statistics.mean(values):.1f}"
+        )
 
 
 def main():
@@ -101,6 +124,12 @@ def main():
     ignored_dt = len(raw_dt_values) - len(dt_values)
     if ignored_dt:
         print(f"ignored_implausible_loop_dt_ms={ignored_dt}")
+    summarize_scalar(rows, "period_us", "period_us")
+    summarize_scalar(rows, "body_us", "body_us")
+    summarize_scalar(rows, "qti_us", "qti_wait_us")
+    summarize_scalar(rows, "policy_us", "policy_us")
+    summarize_scalar(rows, "drive_us", "drive_us")
+    summarize_scalar(rows, "qti_sample_us", "qti_sample_us")
     print("raw rc_time values: lower should be brighter/whiter, higher should be darker/blacker")
     for i, label in enumerate(labels):
         raw_values = [row["raw"][i] for row in rows]

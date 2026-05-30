@@ -44,6 +44,7 @@ def read_env_config(path):
         "line_width_jitter_m": f("line_width_jitter_m", 0.006),
         "line_edge_softness_m": f("line_edge_softness_m", 0.006),
         "line_edge_softness_jitter_m": f("line_edge_softness_jitter_m", 0.004),
+        "line_reflectance_noise": f("line_reflectance_noise", 0.12),
         "start_lateral_offset_m": f("start_lateral_offset_m", 0.025),
     }
 
@@ -95,6 +96,8 @@ def sample_sensor_layout(cfg, rng):
 def sample_sensor_response(cfg, rng, robot_lateral_m):
     width, softness = sample_episode_params(cfg, rng)
     sensor_laterals = sample_sensor_layout(cfg, rng)
+    reflectance_noise = min(max(cfg["line_reflectance_noise"], 0.0), 0.35)
+    black_reflectance = 1.0 - reflectance_noise * rng.random()
     raw = []
     obs = []
     coverage = []
@@ -110,7 +113,7 @@ def sample_sensor_response(cfg, rng, robot_lateral_m):
         black = min(black, cfg["qti_timeout"])
         black = max(black, white + 1.0)
         cov = line_coverage(robot_lateral_m + lateral, width, softness)
-        reading = white + cov * (black - white)
+        reading = white + cov * black_reflectance * (black - white)
         reading += cfg["sensor_noise_std"] * rand_signed(rng)
         reading = clamp(reading, 0.0, cfg["qti_timeout"])
         normalized = clamp(
@@ -158,6 +161,8 @@ def sample_start_response(cfg, rng):
     width, softness = sample_episode_params(cfg, rng)
     sensor_laterals = sample_sensor_layout(cfg, rng)
     offset = start_sampler_offset(cfg, sensor_laterals, width, rng)
+    reflectance_noise = min(max(cfg["line_reflectance_noise"], 0.0), 0.35)
+    black_reflectance = 1.0 - reflectance_noise * rng.random()
 
     raw = []
     obs = []
@@ -174,7 +179,7 @@ def sample_start_response(cfg, rng):
         black = min(black, cfg["qti_timeout"])
         black = max(black, white + 1.0)
         cov = line_coverage(offset + lateral, width, softness)
-        reading = white + cov * (black - white)
+        reading = white + cov * black_reflectance * (black - white)
         reading += cfg["sensor_noise_std"] * rand_signed(rng)
         reading = clamp(reading, 0.0, cfg["qti_timeout"])
         normalized = clamp(
@@ -289,6 +294,7 @@ def main():
         f"white={cfg['qti_white_time']:.1f} black={cfg['qti_black_time']:.1f} "
         f"line_width={1000.0 * cfg['line_width_m']:.1f}mm "
         f"edge_softness={1000.0 * cfg['line_edge_softness_m']:.1f}mm "
+        f"reflectance_noise={cfg['line_reflectance_noise']:.2f} "
         f"sensor_side={1000.0 * cfg['sensor_side_lateral_m']:.1f}mm"
     )
 

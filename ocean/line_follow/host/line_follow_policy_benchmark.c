@@ -103,9 +103,12 @@ static const BenchCase STRESS_CASES[] = {
     {"stress_yaw_right", LINE_FOLLOW_TRACK_STRAIGHT, 0.42f, 0.0f, 0.000f, -0.30f, false, 0},
     {"stress_arc_left", LINE_FOLLOW_TRACK_ARC, 0.12f, 1.25f, 0.000f, 0.000f, false, 0},
     {"stress_arc_right", LINE_FOLLOW_TRACK_ARC, 0.12f, 1.25f, 0.000f, 0.000f, true, 0},
+    {"stress_tight_arc_left", LINE_FOLLOW_TRACK_ARC, 0.075f, 1.90f, 0.000f, 0.000f, false, 0},
+    {"stress_tight_arc_right", LINE_FOLLOW_TRACK_ARC, 0.075f, 1.90f, 0.000f, 0.000f, true, 0},
     {"stress_s_curve", LINE_FOLLOW_TRACK_S_CURVE, 0.42f, 0.060f, 0.000f, 0.000f, false, 0},
     {"stress_s_curve_mirror", LINE_FOLLOW_TRACK_S_CURVE, 0.42f, 0.060f, 0.000f, 0.000f, true, 0},
     {"stress_oval", LINE_FOLLOW_TRACK_OVAL, 0.075f, 0.042f, 0.000f, 0.000f, false, 0},
+    {"stress_tight_oval", LINE_FOLLOW_TRACK_OVAL, 0.065f, 0.032f, 0.000f, 0.000f, false, 0},
 };
 
 static const BenchCase SEEDED_RANDOM_CASES[] = {
@@ -189,6 +192,7 @@ static void reset_case(LineFollow* env, const BenchCase* c) {
     env->line_width_jitter_m = 0.0f;
     env->line_width_segment_jitter_m = 0.0f;
     env->line_edge_softness_jitter_m = 0.0f;
+    env->line_reflectance_noise = 0.0f;
     env->sensor_noise_std = 0.0f;
     sensor_layout(env);
 
@@ -414,7 +418,8 @@ static void write_json_summary(const char* path, const char* controller_name,
     fprintf(f, "    \"line_width_jitter_m\": %.6f,\n", env->line_width_jitter_m);
     fprintf(f, "    \"line_width_segment_jitter_m\": %.6f,\n", env->line_width_segment_jitter_m);
     fprintf(f, "    \"line_edge_softness_m\": %.6f,\n", env->line_edge_softness_m);
-    fprintf(f, "    \"line_edge_softness_jitter_m\": %.6f\n", env->line_edge_softness_jitter_m);
+    fprintf(f, "    \"line_edge_softness_jitter_m\": %.6f,\n", env->line_edge_softness_jitter_m);
+    fprintf(f, "    \"line_reflectance_noise\": %.6f\n", env->line_reflectance_noise);
     fprintf(f, "  },\n");
     fprintf(f, "  \"qti\": {\n");
     fprintf(f, "    \"white_time\": %.6f,\n", env->qti_white_time);

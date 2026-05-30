@@ -8,10 +8,12 @@
 */
 
 #include "simpletools.h"
+#include <propeller.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 
+#include "line_follow_qti_sampler.h"
 #include "line_follow_model_weights.h"
 
 #ifndef LINE_FOLLOW_ENABLE_DRIVE
@@ -44,6 +46,29 @@
 
 #ifndef QTI_THRESHOLD_Q1000
 #define QTI_THRESHOLD_Q1000 500
+#endif
+
+#ifndef QTI_CHARGE_US
+#define QTI_CHARGE_US 230
+#endif
+
+#ifndef QTI_TIMEOUT_US
+#define QTI_TIMEOUT_US 1000
+#endif
+
+#ifndef QTI_SAMPLE_PERIOD_US
+#define QTI_SAMPLE_PERIOD_US 0
+#endif
+
+#define LINE_FOLLOW_QTI_MODE_SEQUENTIAL 0
+#define LINE_FOLLOW_QTI_MODE_GROUPED_C 1
+#define LINE_FOLLOW_QTI_MODE_PASM_COG 2
+#ifndef LINE_FOLLOW_QTI_MODE
+#define LINE_FOLLOW_QTI_MODE LINE_FOLLOW_QTI_MODE_PASM_COG
+#endif
+
+#if LINE_FOLLOW_QTI_MODE < LINE_FOLLOW_QTI_MODE_SEQUENTIAL || LINE_FOLLOW_QTI_MODE > LINE_FOLLOW_QTI_MODE_PASM_COG
+#error "LINE_FOLLOW_QTI_MODE must be 0=sequential, 1=grouped C, or 2=PASM cog"
 #endif
 
 #ifndef LINE_FOLLOW_LOOP_MS
@@ -157,6 +182,25 @@ static int qti_pins[SENSOR_COUNT] = {
   QTI_RIGHT_PIN
 };
 
+static unsigned int qti_pin_masks[SENSOR_COUNT] = {
+  1u << QTI_LEFT_PIN,
+  1u << QTI_MIDDLE_PIN,
+  1u << QTI_RIGHT_PIN
+};
+static unsigned int qti_pin_mask =
+  (1u << QTI_LEFT_PIN) | (1u << QTI_MIDDLE_PIN) | (1u << QTI_RIGHT_PIN);
+
+static int qti_wait_us = 0;
+static int qti_sample_us = 0;
+static int qti_sample_period_us = 0;
+static unsigned int qti_last_seq = 0;
+
+#if LINE_FOLLOW_QTI_MODE == LINE_FOLLOW_QTI_MODE_PASM_COG
+extern unsigned int _load_start_coguser0[];
+static volatile LineFollowQtiSamplerMailbox qti_mailbox;
+static int qti_cog_id = -1;
+#endif
+
 static const float* encoder_w;
 static const float* decoder_w;
 static const float* mingru_w;
@@ -199,6 +243,12 @@ typedef struct SdLogRow {
   int32_t elapsed_ms;
   int32_t period_ms;
   int32_t body_ms;
+  int32_t period_us;
+  int32_t body_us;
+  int32_t qti_wait_us;
+  int32_t policy_us;
+  int32_t drive_us;
+  int32_t qti_sample_us;
   int32_t raw[SENSOR_COUNT];
   int32_t encoder_left_ticks;
   int32_t encoder_right_ticks;
@@ -306,6 +356,32 @@ static int normalize_q1000(int raw)
   return clamp_int(obs, 0, 1000);
 }
 
+static unsigned int ticks_per_us(void)
+{
+  return (unsigned int)(CLKFREQ / 1000000);
+}
+
+static int elapsed_us(unsigned int start_ticks, unsigned int end_ticks)
+{
+  unsigned int per_us = ticks_per_us();
+  unsigned int elapsed_ticks = end_ticks - start_ticks;
+  return (int)((elapsed_ticks + per_us / 2) / per_us);
+}
+
+static int ticks_to_us(unsigned int ticks)
+{
+  unsigned int per_us = ticks_per_us();
+  return (int)((ticks + per_us / 2) / per_us);
+}
+
+static void wait_us_blocking(int wait_us)
+{
+  if(wait_us > 0)
+  {
+    waitcnt(CNT + (unsigned int)wait_us * ticks_per_us());
+  }
+}
+
 static int read_qti_pin(int pin)
 {
   high(pin);
@@ -313,13 +389,161 @@ static int read_qti_pin(int pin)
   return rc_time(pin, 1);
 }
 
+static void read_qti_grouped_raw(int raw[SENSOR_COUNT])
+{
+  unsigned int charge_start = CNT;
+  unsigned int decay_start;
+  unsigned int now;
+  unsigned int raw_ticks[SENSOR_COUNT];
+  unsigned int timeout_ticks = (unsigned int)QTI_TIMEOUT_US * ticks_per_us();
+  int done[SENSOR_COUNT] = {0, 0, 0};
+  int done_count = 0;
+  int i;
+
+  if(timeout_ticks == 0)
+  {
+    timeout_ticks = ticks_per_us();
+  }
+
+  for(i = 0; i < SENSOR_COUNT; i++)
+  {
+    raw_ticks[i] = timeout_ticks;
+  }
+
+  OUTA |= qti_pin_mask;
+  DIRA |= qti_pin_mask;
+  wait_us_blocking(QTI_CHARGE_US);
+  DIRA &= ~qti_pin_mask;
+
+  decay_start = CNT;
+  while(done_count < SENSOR_COUNT)
+  {
+    unsigned int pins;
+    now = CNT;
+    if(now - decay_start >= timeout_ticks)
+    {
+      break;
+    }
+    pins = INA;
+    for(i = 0; i < SENSOR_COUNT; i++)
+    {
+      if(!done[i] && ((pins & qti_pin_masks[i]) == 0))
+      {
+        raw_ticks[i] = now - decay_start;
+        done[i] = 1;
+        done_count++;
+      }
+    }
+  }
+
+  for(i = 0; i < SENSOR_COUNT; i++)
+  {
+    raw[i] = ticks_to_us(raw_ticks[i]);
+  }
+  qti_wait_us = elapsed_us(charge_start, CNT);
+  qti_sample_us = qti_wait_us;
+  qti_sample_period_us = qti_wait_us;
+}
+
+#if LINE_FOLLOW_QTI_MODE == LINE_FOLLOW_QTI_MODE_PASM_COG
+static void start_qti_sampler_cog(void)
+{
+  int i;
+  qti_mailbox.control = 1;
+  qti_mailbox.seq = 0;
+  for(i = 0; i < SENSOR_COUNT; i++)
+  {
+    qti_mailbox.raw[i] = 0;
+    qti_mailbox.pin[i] = qti_pins[i];
+  }
+  qti_mailbox.sample_us = 0;
+  qti_mailbox.period_us = 0;
+  qti_mailbox.charge_ticks = QTI_CHARGE_US * (int)ticks_per_us();
+  qti_mailbox.timeout_ticks = QTI_TIMEOUT_US * (int)ticks_per_us();
+  qti_mailbox.sample_period_ticks = QTI_SAMPLE_PERIOD_US * (int)ticks_per_us();
+  qti_mailbox.ticks_per_us = (int)ticks_per_us();
+  qti_last_seq = 0;
+  qti_cog_id = cognew(_load_start_coguser0, (void*)&qti_mailbox);
+  if(qti_cog_id < 0)
+  {
+    print("QTI PASM cog start failed\n");
+    while(1)
+    {
+      pause(1000);
+    }
+  }
+}
+
+static void stop_qti_sampler_cog(void)
+{
+  if(qti_cog_id >= 0)
+  {
+    qti_mailbox.control = 0;
+    pause(10);
+    cogstop(qti_cog_id);
+    qti_cog_id = -1;
+  }
+}
+
+static void read_qti_cog_raw(int raw[SENSOR_COUNT])
+{
+  unsigned int wait_start = CNT;
+  unsigned int seq_before;
+  unsigned int seq_after;
+  int stable = 0;
+  int i;
+
+  while(!stable)
+  {
+    do
+    {
+      seq_before = qti_mailbox.seq;
+    }
+    while(seq_before == qti_last_seq || (seq_before & 1u));
+
+    for(i = 0; i < SENSOR_COUNT; i++)
+    {
+      raw[i] = ticks_to_us((unsigned int)qti_mailbox.raw[i]);
+    }
+    qti_sample_us = ticks_to_us((unsigned int)qti_mailbox.sample_us);
+    qti_sample_period_us = ticks_to_us((unsigned int)qti_mailbox.period_us);
+    seq_after = qti_mailbox.seq;
+    stable = seq_before == seq_after && (seq_after & 1u) == 0;
+  }
+
+  qti_last_seq = seq_after;
+  qti_wait_us = elapsed_us(wait_start, CNT);
+}
+#else
+static void start_qti_sampler_cog(void)
+{
+}
+
+static void stop_qti_sampler_cog(void)
+{
+}
+#endif
+
 static void read_qti(int raw[SENSOR_COUNT], int obs_q1000[SENSOR_COUNT],
     float model_obs[OBS_SIZE])
 {
   int i;
+#if LINE_FOLLOW_QTI_MODE == LINE_FOLLOW_QTI_MODE_SEQUENTIAL
+  unsigned int qti_start = CNT;
   for(i = 0; i < SENSOR_COUNT; i++)
   {
     raw[i] = read_qti_pin(qti_pins[i]);
+  }
+  qti_wait_us = elapsed_us(qti_start, CNT);
+  qti_sample_us = qti_wait_us;
+  qti_sample_period_us = qti_wait_us;
+#elif LINE_FOLLOW_QTI_MODE == LINE_FOLLOW_QTI_MODE_GROUPED_C
+  read_qti_grouped_raw(raw);
+#else
+  read_qti_cog_raw(raw);
+#endif
+  for(i = 0; i < SENSOR_COUNT; i++)
+  {
     obs_q1000[i] = normalize_q1000(raw[i]);
   }
 #if LINE_FOLLOW_INFERENCE_MODE == LINE_FOLLOW_INFERENCE_FIXED
@@ -388,7 +612,7 @@ static void forward_model(const float obs[OBS_SIZE], float actions[NUM_ACTIONS])
 }
 
 static void forward_model_fixed(const int obs_q1000[OBS_SIZE],
-    int action_fixed[NUM_ACTIONS], float actions[NUM_ACTIONS])
+    int action_fixed[NUM_ACTIONS])
 {
   int action;
   for(action = 0; action < NUM_ACTIONS; action++)
@@ -403,9 +627,12 @@ static void forward_model_fixed(const int obs_q1000[OBS_SIZE],
     action_fixed[action] = clamp_int(
         round_div_int(total, 1000),
         -LINE_FOLLOW_MODEL_FIXED_SCALE, LINE_FOLLOW_MODEL_FIXED_SCALE);
-    actions[action] = (float)action_fixed[action]
-      / (float)LINE_FOLLOW_MODEL_FIXED_SCALE;
   }
+}
+
+static int action_fixed_to_q1000(int action_fixed)
+{
+  return round_div_int(action_fixed * 1000, LINE_FOLLOW_MODEL_FIXED_SCALE);
 }
 
 static int action_to_ticks(float action)
@@ -486,6 +713,21 @@ static void print_float3(float value)
   {
     scaled = (int)(value * -1000.0f + 0.5f);
     print("-");
+  }
+  print("%d.%03d", scaled / 1000, scaled % 1000);
+}
+
+static void print_action_fixed3(int action_fixed)
+{
+  int scaled = action_fixed_to_q1000(action_fixed);
+  if(scaled >= 0)
+  {
+    print(" ");
+  }
+  else
+  {
+    print("-");
+    scaled = -scaled;
   }
   print("%d.%03d", scaled / 1000, scaled % 1000);
 }
@@ -659,8 +901,10 @@ static FILE* open_sd_log(void)
 }
 
 static int write_sd_row(FILE* fp, int loop, int elapsed_total_ms,
-    int period_ms, int body_ms, int raw[SENSOR_COUNT],
+    int period_ms, int body_ms, int period_us, int body_us,
+    int qti_us, int policy_us, int drive_us, int sample_us, int raw[SENSOR_COUNT],
     int obs_q1000[SENSOR_COUNT], float actions[NUM_ACTIONS],
+    int action_fixed[NUM_ACTIONS],
     int left_ticks, int right_ticks, int encoder_left_ticks,
     int encoder_right_ticks)
 {
@@ -671,6 +915,12 @@ static int write_sd_row(FILE* fp, int loop, int elapsed_total_ms,
   row.elapsed_ms = elapsed_total_ms;
   row.period_ms = period_ms;
   row.body_ms = body_ms;
+  row.period_us = period_us;
+  row.body_us = body_us;
+  row.qti_wait_us = qti_us;
+  row.policy_us = policy_us;
+  row.drive_us = drive_us;
+  row.qti_sample_us = sample_us;
   for(i = 0; i < SENSOR_COUNT; i++)
   {
     row.raw[i] = raw[i];
@@ -678,8 +928,13 @@ static int write_sd_row(FILE* fp, int loop, int elapsed_total_ms,
   }
   row.encoder_left_ticks = encoder_left_ticks;
   row.encoder_right_ticks = encoder_right_ticks;
+#if LINE_FOLLOW_INFERENCE_MODE == LINE_FOLLOW_INFERENCE_FIXED
+  row.action_q1000[0] = action_fixed_to_q1000(action_fixed[0]);
+  row.action_q1000[1] = action_fixed_to_q1000(action_fixed[1]);
+#else
   row.action_q1000[0] = float_q1000(actions[0]);
   row.action_q1000[1] = float_q1000(actions[1]);
+#endif
   row.command_left_ticks = left_ticks;
   row.command_right_ticks = right_ticks;
   row.flags = 0;
@@ -719,9 +974,16 @@ int main(void)
   unsigned int loop_start_ticks = 0;
   unsigned int prev_loop_start_ticks = 0;
   unsigned int run_start_ticks = 0;
+  unsigned int qti_end_ticks = 0;
+  unsigned int policy_end_ticks = 0;
+  unsigned int drive_end_ticks = 0;
   unsigned int loop_end_ticks = 0;
   int body_ms = 0;
   int period_ms = 0;
+  int body_us = 0;
+  int period_us = 0;
+  int policy_us = 0;
+  int drive_us = 0;
   int elapsed_total_ms = 0;
   int i;
 #if LINE_FOLLOW_SD_LOG
@@ -768,6 +1030,9 @@ int main(void)
       (int)(MAX_WHEEL_SPEED_MPS * 1000.0f + 0.5f),
       (int)(COMMAND_DEADBAND * 1000.0f + 0.5f),
       (int)(MIN_DRIVE_TICKS_PER_SEC));
+  print("qti_mode=%d charge_us=%d timeout_us=%d sample_period_us=%d\n",
+      LINE_FOLLOW_QTI_MODE, QTI_CHARGE_US, QTI_TIMEOUT_US,
+      QTI_SAMPLE_PERIOD_US);
   print("sd_log=%d sd_file=%s sd_max_records=%d sd_log_every=%d sd_flush_every=%d\n",
       LINE_FOLLOW_SD_LOG, LINE_FOLLOW_SD_FILE, LINE_FOLLOW_SD_MAX_RECORDS,
       LINE_FOLLOW_SD_LOG_EVERY, LINE_FOLLOW_SD_FLUSH_EVERY);
@@ -776,7 +1041,7 @@ int main(void)
   print("clock clkfreq=%d ms_ticks=%d\n", CLKFREQ, ms);
   print("NOTE lower raw should be brighter/whiter, higher raw should be darker/blacker\n");
   print("model observations are left, middle, right; pin 4 is ignored\n");
-  print("L step raw0 raw1 raw2 min0 min1 min2 max0 max1 max2 sensor0 sensor1 sensor2 model0 model1 model2 action0 action1 left right dt_ms\n");
+  print("L step raw0 raw1 raw2 min0 min1 min2 max0 max1 max2 sensor0 sensor1 sensor2 model0 model1 model2 action0 action1 left right dt_ms period_us body_us qti_us policy_us drive_us qti_sample_us\n");
 
 #if LINE_FOLLOW_SD_LOG
   sd_fp = open_sd_log();
@@ -786,6 +1051,8 @@ int main(void)
     blink_sd_error_forever();
   }
 #endif
+
+  start_qti_sampler_cog();
 
 #if LINE_FOLLOW_ENABLE_DRIVE
   drive_setRampStep(4);
@@ -808,8 +1075,12 @@ int main(void)
     period_ms = prev_loop_start_ticks == 0
         ? 0
         : elapsed_ms(prev_loop_start_ticks, loop_start_ticks);
+    period_us = prev_loop_start_ticks == 0
+        ? 0
+        : elapsed_us(prev_loop_start_ticks, loop_start_ticks);
     prev_loop_start_ticks = loop_start_ticks;
     read_qti(raw, obs_q1000, model_obs);
+    qti_end_ticks = read_clock_ticks();
     for(i = 0; i < SENSOR_COUNT; i++)
     {
       if(raw[i] < raw_min[i]) raw_min[i] = raw[i];
@@ -817,7 +1088,7 @@ int main(void)
     }
 
 #if LINE_FOLLOW_INFERENCE_MODE == LINE_FOLLOW_INFERENCE_FIXED
-    forward_model_fixed(obs_q1000, action_fixed, actions);
+    forward_model_fixed(obs_q1000, action_fixed);
     left_ticks = action_fixed_to_ticks(action_fixed[0]);
     right_ticks = action_fixed_to_ticks(action_fixed[1]);
 #else
@@ -825,7 +1096,16 @@ int main(void)
     left_ticks = action_to_ticks(actions[0]);
     right_ticks = action_to_ticks(actions[1]);
 #endif
-    loop_end_ticks = read_clock_ticks();
+    policy_end_ticks = read_clock_ticks();
+
+#if LINE_FOLLOW_ENABLE_DRIVE
+    drive_speed(left_ticks, right_ticks);
+#endif
+    drive_end_ticks = read_clock_ticks();
+    loop_end_ticks = drive_end_ticks;
+    policy_us = elapsed_us(qti_end_ticks, policy_end_ticks);
+    drive_us = elapsed_us(policy_end_ticks, drive_end_ticks);
+    body_us = elapsed_us(loop_start_ticks, loop_end_ticks);
     body_ms = elapsed_ms(loop_start_ticks, loop_end_ticks);
 
     if(LINE_FOLLOW_PRINT_EVERY > 0 && (loops % LINE_FOLLOW_PRINT_EVERY) == 0)
@@ -837,15 +1117,19 @@ int main(void)
       for(i = 0; i < SENSOR_COUNT; i++) print_int_field(obs_q1000[i]);
       for(i = 0; i < OBS_SIZE; i++) print_int_field(obs_q1000[i]);
       print(" ");
+#if LINE_FOLLOW_INFERENCE_MODE == LINE_FOLLOW_INFERENCE_FIXED
+      print_action_fixed3(action_fixed[0]);
+      print(" ");
+      print_action_fixed3(action_fixed[1]);
+#else
       print_float3(actions[0]);
       print(" ");
       print_float3(actions[1]);
-      print(" %d %d %d\n", left_ticks, right_ticks, body_ms);
-    }
-
-#if LINE_FOLLOW_ENABLE_DRIVE
-    drive_speed(left_ticks, right_ticks);
 #endif
+      print(" %d %d %d %d %d %d %d %d %d\n",
+          left_ticks, right_ticks, body_ms, period_us, body_us,
+          qti_wait_us, policy_us, drive_us, qti_sample_us);
+    }
 
 #if LINE_FOLLOW_SD_LOG
 #if LINE_FOLLOW_ENABLE_DRIVE
@@ -854,7 +1138,8 @@ int main(void)
     if(LINE_FOLLOW_SD_LOG_EVERY > 0 && (loops % LINE_FOLLOW_SD_LOG_EVERY) == 0)
     {
       if(write_sd_row(sd_fp, loops, elapsed_total_ms, period_ms, body_ms,
-          raw, obs_q1000, actions, left_ticks, right_ticks,
+          period_us, body_us, qti_wait_us, policy_us, drive_us, qti_sample_us,
+          raw, obs_q1000, actions, action_fixed, left_ticks, right_ticks,
           encoder_left_ticks, encoder_right_ticks))
       {
         print("SD row write failed at loop=%d\n", loops);
@@ -887,6 +1172,8 @@ int main(void)
   pause(250);
   drive_close();
 #endif
+
+  stop_qti_sampler_cog();
 
 #if LINE_FOLLOW_SD_LOG
   if(sd_fp)

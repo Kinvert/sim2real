@@ -72,6 +72,7 @@ void my_init(Env* env, Dict* kwargs) {
     env->line_width_segment_jitter_m = dict_get(kwargs, "line_width_segment_jitter_m")->value;
     env->line_edge_softness_m = dict_get(kwargs, "line_edge_softness_m")->value;
     env->line_edge_softness_jitter_m = dict_get(kwargs, "line_edge_softness_jitter_m")->value;
+    env->line_reflectance_noise = dict_get(kwargs, "line_reflectance_noise")->value;
     env->track_bounds_m = dict_get(kwargs, "track_bounds_m")->value;
     env->start_lateral_offset_m = dict_get(kwargs, "start_lateral_offset_m")->value;
     env->start_heading_offset_rad = dict_get(kwargs, "start_heading_offset_rad")->value;

@@ -49,6 +49,10 @@ NUM_LAYERS="${LINE_FOLLOW_NUM_LAYERS:-$LINE_FOLLOW_NUM_LAYERS_DEFAULT}"
 MAX_WHEEL_SPEED_MPS="${LINE_FOLLOW_MAX_WHEEL_SPEED_MPS:-$LINE_FOLLOW_MAX_WHEEL_SPEED_MPS_DEFAULT}"
 COMMAND_DEADBAND="${LINE_FOLLOW_COMMAND_DEADBAND:-$LINE_FOLLOW_COMMAND_DEADBAND_DEFAULT}"
 MIN_DRIVE_TICKS_PER_SEC="${LINE_FOLLOW_MIN_DRIVE_TICKS_PER_SEC:-$LINE_FOLLOW_MIN_DRIVE_TICKS_PER_SEC_DEFAULT}"
+QTI_MODE="${LINE_FOLLOW_QTI_MODE:-2}"
+QTI_CHARGE_US="${QTI_CHARGE_US:-230}"
+QTI_TIMEOUT_US="${QTI_TIMEOUT_US:-1000}"
+QTI_SAMPLE_PERIOD_US="${QTI_SAMPLE_PERIOD_US:-0}"
 MAX_WHEEL_TICKS_PER_SEC_Q1000="$(
   awk -v mps="$MAX_WHEEL_SPEED_MPS" 'BEGIN {
     printf "%d", (mps / (3.14159265358979323846 * 0.065)) * 64.0 * 1000.0 + 0.5
@@ -64,6 +68,8 @@ fi
 
 OUT_DIR="$LINE_FOLLOW_ROOT/build/line-follow"
 SRC="$LINE_FOLLOW_ROOT/firmware/line_follow_model_live.c"
+QTI_COG_SRC="$LINE_FOLLOW_ROOT/firmware/line_follow_qti_sampler.s"
+QTI_COG_OBJ="$OUT_DIR/line_follow_qti_sampler.o"
 HEADER="$OUT_DIR/line_follow_model_weights.h"
 OUT="$OUT_DIR/$OUT_NAME.elf"
 
@@ -115,7 +121,12 @@ args=(
   -DQTI_WHITE_TIME="${QTI_WHITE_TIME:-$LINE_FOLLOW_QTI_WHITE_TIME_DEFAULT}"
   -DQTI_BLACK_TIME="${QTI_BLACK_TIME:-$LINE_FOLLOW_QTI_BLACK_TIME_DEFAULT}"
   -DQTI_THRESHOLD_Q1000="${QTI_THRESHOLD_Q1000:-500}"
+  -DLINE_FOLLOW_QTI_MODE="$QTI_MODE"
+  -DQTI_CHARGE_US="$QTI_CHARGE_US"
+  -DQTI_TIMEOUT_US="$QTI_TIMEOUT_US"
+  -DQTI_SAMPLE_PERIOD_US="$QTI_SAMPLE_PERIOD_US"
   -I"$OUT_DIR"
+  -I"$LINE_FOLLOW_ROOT/firmware"
   -I"$PARALLAX_SIMPLE_LIBS/Utility/libsimpletools"
   -I"$PARALLAX_SIMPLE_LIBS/TextDevices/libsimpletext"
   -I"$PARALLAX_SIMPLE_LIBS/Protocol/libsimplei2c"
@@ -129,6 +140,12 @@ if [[ -n "${LINE_FOLLOW_INFERENCE_MODE:-}" ]]; then
 fi
 
 libs=(-lsimpletools -lsimpletext -lsimplei2c -lm)
+extra_objects=()
+
+if [[ "$QTI_MODE" == "2" ]]; then
+  propeller-elf-gcc -c -o "$QTI_COG_OBJ" "$QTI_COG_SRC"
+  extra_objects+=("$QTI_COG_OBJ")
+fi
 
 if [[ "$ENABLE_DRIVE" == "1" ]]; then
   args+=(
@@ -140,7 +157,7 @@ if [[ "$ENABLE_DRIVE" == "1" ]]; then
   libs=(-labdrive -lfdserial "${libs[@]}")
 fi
 
-propeller-elf-gcc "${args[@]}" -o "$OUT" "$SRC" "${libs[@]}"
+propeller-elf-gcc "${args[@]}" -o "$OUT" "$SRC" "${extra_objects[@]}" "${libs[@]}"
 
 propeller-elf-size "$OUT"
 echo "Built $OUT"
@@ -155,6 +172,10 @@ fi
 echo "Hidden size: $HIDDEN_SIZE"
 echo "Num recurrent layers: $NUM_LAYERS"
 echo "Inference mode: ${LINE_FOLLOW_INFERENCE_MODE:-auto}"
+echo "QTI mode: $QTI_MODE (0=sequential, 1=grouped C, 2=PASM cog)"
+echo "QTI charge: $QTI_CHARGE_US us"
+echo "QTI timeout: $QTI_TIMEOUT_US us"
+echo "QTI sample period: $QTI_SAMPLE_PERIOD_US us"
 echo "Max wheel speed: $MAX_WHEEL_SPEED_MPS m/s"
 echo "Command deadband: $COMMAND_DEADBAND"
 echo "Minimum drive ticks/sec: $MIN_DRIVE_TICKS_PER_SEC"

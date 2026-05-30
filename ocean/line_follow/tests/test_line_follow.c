@@ -198,6 +198,8 @@ static void test_measured_geometry_defaults(void) {
         "per-track line width randomization covers uneven hand-drawn segments");
     expect_near(env.line_edge_softness_jitter_m, 0.004f, 1e-6f,
         "line edge softness is randomized for training");
+    expect_near(env.line_reflectance_noise, 0.12f, 1e-6f,
+        "line reflectance noise covers uneven hand-drawn marker darkness");
     expect_near(env.start_lateral_offset_m, 0.025f, 1e-6f,
         "start offset stays within the active sensor span");
     expect_near(env.start_heading_offset_rad, 0.261799f, 1e-6f,
@@ -336,6 +338,15 @@ static void test_track_generation(void) {
     LineFollowNearest off_line = nearest_track(&track, 0.0f, 0.05f);
     expect_near(off_line.distance_m, 0.05f, 1e-4f, "nearest distance matches off-line offset");
     expect_true(off_line.signed_lateral_m > 0.0f, "positive y is positive signed lateral on theta-zero straight");
+
+    expect_true(generate_arc(&track, 0.07f, 2.0f, 0.006f, 1.0f),
+        "tight arc track generation succeeds");
+    expect_true(track.length_m < 0.16f,
+        "tight arc training case has a short-radius turn");
+    expect_true(generate_oval(&track, 0.055f, 0.030f, 0.006f, 1.0f),
+        "tight oval track generation succeeds");
+    expect_true(track_in_bounds(&track, 1.0f),
+        "tight oval track remains in bounds");
 
     unsigned int rng = 123u;
     bool seen_positive_start_y = false;
@@ -902,6 +913,7 @@ static void test_randomized_sensor_response_clamps_observations(void) {
     env.line_width_jitter_m = 0.010f;
     env.line_width_segment_jitter_m = 0.010f;
     env.line_edge_softness_jitter_m = 0.010f;
+    env.line_reflectance_noise = 0.50f;
 
     for (int episode = 0; episode < 32; episode++) {
         c_reset(&env);
@@ -920,6 +932,10 @@ static void test_randomized_sensor_response_clamps_observations(void) {
         for (int i = 0; i < env.track.sample_count; i++) {
             expect_true(env.track.samples[i].line_width_m >= 0.004f,
                 "randomized per-segment line width stays positive");
+            expect_true(env.track.samples[i].black_reflectance >= 0.65f,
+                "randomized per-segment line reflectance stays dark enough");
+            expect_true(env.track.samples[i].black_reflectance <= 1.0f,
+                "randomized per-segment line reflectance does not exceed black calibration");
         }
         expect_true(env.episode_line_edge_softness_m >= 0.001f,
             "randomized line edge softness stays positive");
@@ -966,6 +982,62 @@ static void test_segment_line_width_jitter_varies_track_samples(void) {
         "per-segment width jitter respects the upper configured range");
 }
 
+static void test_line_reflectance_noise_varies_track_samples(void) {
+    float obs[LINE_FOLLOW_OBS_SIZE] = {0};
+    float actions[2] = {0};
+    float rewards[1] = {0};
+    float terminals[1] = {0};
+    LineFollow env = make_test_env(obs, actions, rewards, terminals);
+
+    env.rng = 456u;
+    env.track_family = LINE_FOLLOW_TRACK_S_CURVE;
+    env.line_reflectance_noise = 0.12f;
+    c_reset(&env);
+
+    float min_reflectance = 1e9f;
+    float max_reflectance = -1e9f;
+    for (int i = 0; i < env.track.sample_count; i++) {
+        float reflectance = env.track.samples[i].black_reflectance;
+        if (reflectance < min_reflectance) min_reflectance = reflectance;
+        if (reflectance > max_reflectance) max_reflectance = reflectance;
+    }
+
+    expect_true(max_reflectance - min_reflectance > 0.003f,
+        "line reflectance noise changes marker darkness inside an episode");
+    expect_true(min_reflectance >= 0.88f - 1e-6f,
+        "line reflectance noise respects the lower configured range");
+    expect_true(max_reflectance <= 1.0f + 1e-6f,
+        "line reflectance noise respects the upper configured range");
+
+    env = make_test_env(obs, actions, rewards, terminals);
+    env.sensor_forward_jitter_m = 0.0f;
+    env.sensor_lateral_jitter_m = 0.0f;
+    env.qti_white_jitter = 0.0f;
+    env.qti_black_jitter = 0.0f;
+    env.sensor_noise_std = 0.0f;
+    env.episode_line_width_m = env.line_width_m;
+    env.episode_line_edge_softness_m = env.line_edge_softness_m;
+    sensor_layout(&env);
+    expect_true(generate_straight(&env.track, 1.0f, env.line_width_m, env.track_bounds_m),
+        "straight reflectance test track generation succeeds");
+    reset_runtime_pose(&env, 0.0f, 0.0f, 0.0f);
+    compute_observations(&env);
+    float full_black_middle = env.sensor_obs[LINE_FOLLOW_MIDDLE];
+
+    for (int i = 0; i < env.track.sample_count; i++) {
+        env.track.samples[i].black_reflectance = 0.50f;
+    }
+    compute_observations(&env);
+    float weak_black_middle = env.sensor_obs[LINE_FOLLOW_MIDDLE];
+
+    expect_true(full_black_middle > 0.95f,
+        "full black reflectance produces a black middle-sensor observation");
+    expect_true(weak_black_middle > 0.45f && weak_black_middle < 0.55f,
+        "weaker black reflectance scales the middle-sensor observation");
+    expect_true(weak_black_middle < full_black_middle - 0.40f,
+        "weaker black reflectance is materially different from full black");
+}
+
 int main(void) {
     test_qti_normalization();
     test_propeller_qti_normalization_parity();
@@ -988,6 +1060,7 @@ int main(void) {
     test_reward_clamp_and_reset_start_visibility();
     test_randomized_sensor_response_clamps_observations();
     test_segment_line_width_jitter_varies_track_samples();
+    test_line_reflectance_noise_varies_track_samples();
 
     if (failures > 0) {
         fprintf(stderr, "%d line_follow test failures\n", failures);

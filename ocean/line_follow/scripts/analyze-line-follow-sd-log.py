@@ -9,8 +9,10 @@ from statistics import mean
 MAGIC = 0x4453464C
 HEADER_FMT = "<I18i128s"
 ROW_FMT = "<17i"
+ROW_FMT_V2 = "<23i"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 ROW_SIZE = struct.calcsize(ROW_FMT)
+ROW_SIZE_V2 = struct.calcsize(ROW_FMT_V2)
 
 HEADER_NAMES = [
     "magic",
@@ -55,6 +57,32 @@ ROW_NAMES = [
     "flags",
 ]
 
+ROW_NAMES_V2 = [
+    "loop",
+    "elapsed_ms",
+    "period_ms",
+    "body_ms",
+    "period_us",
+    "body_us",
+    "qti_wait_us",
+    "policy_us",
+    "drive_us",
+    "qti_sample_us",
+    "raw_left",
+    "raw_middle",
+    "raw_right",
+    "encoder_left_ticks",
+    "encoder_right_ticks",
+    "obs_left_q1000",
+    "obs_middle_q1000",
+    "obs_right_q1000",
+    "action_left_q1000",
+    "action_right_q1000",
+    "command_left_ticks",
+    "command_right_ticks",
+    "flags",
+]
+
 
 def percentile(values, pct):
     if not values:
@@ -82,20 +110,29 @@ def read_log(path):
             raise SystemExit(
                 f"{path}: header size {header['header_size']} != parser {HEADER_SIZE}"
             )
-        if header["row_size"] != ROW_SIZE:
+        if header["row_size"] == ROW_SIZE:
+            row_fmt = ROW_FMT
+            row_size = ROW_SIZE
+            row_names = ROW_NAMES
+        elif header["row_size"] == ROW_SIZE_V2:
+            row_fmt = ROW_FMT_V2
+            row_size = ROW_SIZE_V2
+            row_names = ROW_NAMES_V2
+        else:
             raise SystemExit(
-                f"{path}: row size {header['row_size']} != parser {ROW_SIZE}"
+                f"{path}: row size {header['row_size']} not supported "
+                f"(known {ROW_SIZE}, {ROW_SIZE_V2})"
             )
 
         rows = []
         while True:
-            row_bytes = f.read(ROW_SIZE)
+            row_bytes = f.read(row_size)
             if not row_bytes:
                 break
-            if len(row_bytes) != ROW_SIZE:
+            if len(row_bytes) != row_size:
                 print(f"warning: ignoring partial trailing row of {len(row_bytes)} bytes")
                 break
-            rows.append(dict(zip(ROW_NAMES, struct.unpack(ROW_FMT, row_bytes))))
+            rows.append(dict(zip(row_names, struct.unpack(row_fmt, row_bytes))))
 
     return header, rows
 
@@ -135,6 +172,8 @@ def summarize(header, rows, path):
     add_derived(rows)
     periods = [r["period_ms"] for r in rows[1:] if r["period_ms"] > 0]
     body = [r["body_ms"] for r in rows if r["body_ms"] > 0]
+    periods_us = [r["period_us"] for r in rows[1:] if r.get("period_us", 0) > 0]
+    body_us = [r["body_us"] for r in rows if r.get("body_us", 0) > 0]
     left_cmd = [r["command_left_ticks"] for r in rows]
     right_cmd = [r["command_right_ticks"] for r in rows]
     avg_cmd = [r["avg_command_ticks"] for r in rows]
@@ -189,6 +228,26 @@ def summarize(header, rows, path):
             f"avg={mean(body):.2f} p50={percentile(body, 50)} "
             f"p95={percentile(body, 95)} max={max(body)}",
         )
+    if periods_us:
+        print(
+            "period_us:",
+            f"avg={mean(periods_us):.1f} p50={percentile(periods_us, 50)} "
+            f"p95={percentile(periods_us, 95)} max={max(periods_us)}",
+        )
+    if body_us:
+        print(
+            "body_us:",
+            f"avg={mean(body_us):.1f} p50={percentile(body_us, 50)} "
+            f"p95={percentile(body_us, 95)} max={max(body_us)}",
+        )
+        for key in ["qti_wait_us", "policy_us", "drive_us", "qti_sample_us"]:
+            values = [r[key] for r in rows if r.get(key, 0) > 0]
+            if values:
+                print(
+                    f"{key}:",
+                    f"avg={mean(values):.1f} p50={percentile(values, 50)} "
+                    f"p95={percentile(values, 95)} max={max(values)}",
+                )
 
     print(
         "command_ticks:",
@@ -239,7 +298,8 @@ def summarize(header, rows, path):
 
 def write_csv(rows, path):
     add_derived(rows)
-    names = ROW_NAMES + [
+    base_names = ROW_NAMES_V2 if rows and "period_us" in rows[0] else ROW_NAMES
+    names = base_names + [
         "delta_left_ticks",
         "delta_right_ticks",
         "avg_command_ticks",
