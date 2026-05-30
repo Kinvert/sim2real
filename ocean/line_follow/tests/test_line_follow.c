@@ -35,6 +35,21 @@ static LineFollow make_test_env(float* obs, float* actions, float* rewards, floa
     return env;
 }
 
+static float total_track_turn(const LineFollowTrack* track) {
+    float total = 0.0f;
+    if (track->sample_count < 3) {
+        return 0.0f;
+    }
+
+    float prev = atan2f(track->samples[0].tangent_y, track->samples[0].tangent_x);
+    for (int i = 1; i < track->sample_count; i++) {
+        float heading = atan2f(track->samples[i].tangent_y, track->samples[i].tangent_x);
+        total += angle_diff(heading, prev);
+        prev = heading;
+    }
+    return total;
+}
+
 static void test_qti_normalization(void) {
     expect_near(qti_normalize(100.0f, 100.0f, 1100.0f), 0.0f, 1e-6f,
         "calibrated white maps to zero");
@@ -351,6 +366,8 @@ static void test_track_generation(void) {
     unsigned int rng = 123u;
     bool seen_positive_start_y = false;
     bool seen_negative_start_y = false;
+    bool seen_clockwise = false;
+    bool seen_counter_clockwise = false;
     bool seen_family[4] = {false};
     for (unsigned int seed = 1; seed < 512; seed++) {
         rng = seed;
@@ -370,9 +387,18 @@ static void test_track_generation(void) {
         if (start_dy < -1e-5f) {
             seen_negative_start_y = true;
         }
+        float turn = total_track_turn(&track);
+        if (turn > 0.2f) {
+            seen_counter_clockwise = true;
+        }
+        if (turn < -0.2f) {
+            seen_clockwise = true;
+        }
     }
     expect_true(seen_positive_start_y && seen_negative_start_y,
         "randomized training tracks include both left and right handed starts");
+    expect_true(seen_clockwise && seen_counter_clockwise,
+        "randomized training tracks include both clockwise and counter-clockwise turns");
     expect_true(!seen_family[LINE_FOLLOW_TRACK_STRAIGHT]
             && seen_family[LINE_FOLLOW_TRACK_ARC]
             && seen_family[LINE_FOLLOW_TRACK_S_CURVE]

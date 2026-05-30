@@ -257,16 +257,19 @@ static inline bool generate_track(LineFollowTrack* track, unsigned int* rng,
         float length = 0.25f + 0.25f * rand01(rng);
         ok = generate_straight(track, length, line_width_m, bounds_m);
     } else if (chosen == LINE_FOLLOW_TRACK_ARC) {
-        float radius = 0.075f + 0.145f * rand01(rng);
-        float angle = 0.85f + 1.05f * rand01(rng);
+        float radius_u = rand01(rng);
+        float radius = 0.070f + 0.150f * radius_u * radius_u;
+        float angle = 0.95f + 1.05f * rand01(rng);
         ok = generate_arc(track, radius, angle, line_width_m, bounds_m);
     } else if (chosen == LINE_FOLLOW_TRACK_S_CURVE) {
-        float length = 0.24f + 0.28f * rand01(rng);
-        float amp = 0.030f + 0.060f * rand01(rng);
+        float length = 0.22f + 0.28f * rand01(rng);
+        float amp = 0.035f + 0.065f * rand01(rng);
         ok = generate_s_curve(track, length, amp, line_width_m, bounds_m);
     } else if (chosen == LINE_FOLLOW_TRACK_OVAL) {
-        float rx = 0.065f + 0.055f * rand01(rng);
-        float ry = 0.032f + 0.048f * rand01(rng);
+        float rx_u = rand01(rng);
+        float ry_u = rand01(rng);
+        float rx = 0.060f + 0.060f * rx_u * rx_u;
+        float ry = 0.030f + 0.050f * ry_u * ry_u;
         ok = generate_oval(track, rx, ry, line_width_m, bounds_m);
     }
 
@@ -278,10 +281,11 @@ static inline bool generate_track(LineFollowTrack* track, unsigned int* rng,
         ok = generate_straight(track, bounds_m * 1.2f, line_width_m, bounds_m);
     }
     if (ok && family == LINE_FOLLOW_TRACK_RANDOM) {
-        if ((rand_r(rng) & 1u) != 0u) {
+        unsigned int orientation = rand_r(rng) & 3u;
+        if ((orientation & 1u) != 0u) {
             ok = track_mirror_y(track);
         }
-        if (ok && (rand_r(rng) & 1u) != 0u) {
+        if (ok && (orientation & 2u) != 0u) {
             ok = track_reverse(track);
         }
         ok = ok && track_in_bounds(track, bounds_m);
