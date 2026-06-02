@@ -33,6 +33,8 @@ def main():
             str(log_path),
             "--checkpoint",
             str(checkpoint),
+            "--min-drive-ticks-per-sec",
+            "6",
         ],
         check=True,
         text=True,
