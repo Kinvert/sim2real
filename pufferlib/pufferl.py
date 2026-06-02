@@ -160,6 +160,7 @@ def print_dashboard(args, model_size, flat_logs, clear=False, idx=[0],
     print('\033[0;0H' + capture.get())
 
 def validate_config(args):
+    sync_policy_to_env(args)
     minibatch_size = args['train']['minibatch_size']
     horizon = args['train']['horizon']
     total_agents = args['vec']['total_agents']
@@ -168,7 +169,19 @@ def validate_config(args):
     assert minibatch_size <= horizon * total_agents, \
         f'minibatch_size {minibatch_size} > total_agents {total_agents} * horizon {horizon}'
 
+def sync_policy_to_env(args):
+    env = args.get('env') if isinstance(args, dict) else None
+    policy = args.get('policy') if isinstance(args, dict) else None
+    if not isinstance(env, dict) or not isinstance(policy, dict):
+        return
+
+    if 'policy_hidden_size' in env and 'hidden_size' in policy:
+        env['policy_hidden_size'] = int(policy['hidden_size'])
+    if 'policy_num_layers' in env and 'num_layers' in policy:
+        env['policy_num_layers'] = int(policy['num_layers'])
+
 def _resolve_backend(args):
+    sync_policy_to_env(args)
     compiled_env = getattr(_C, 'env_name', None)
     assert compiled_env is None or compiled_env == args['env_name'], \
         f'build.sh was run for {compiled_env}, not {args["env_name"]}'
@@ -254,9 +267,10 @@ def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
 
         # In match-sweep mode we need the final checkpoint to feed into match().
         is_final = epoch == train_epochs - 1
-        should_save = (sweep_obj is None
-            and (epoch % args['checkpoint_interval'] == 0 or is_final)
-        ) or (match_mode and is_final)
+        should_save = (
+            (sweep_obj is None and epoch % args['checkpoint_interval'] == 0)
+            or is_final
+        )
         if should_save:
             model_path = os.path.join(checkpoint_dir, f'{pufferl.global_step:016d}.bin')
             backend.save_weights(pufferl, model_path)
@@ -292,9 +306,9 @@ def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
 
 
     print_dashboard(args, model_size, flat_logs)
-    # Match-mode trials may have early-stopped before the in-loop save fired;
-    # ensure we always have a checkpoint to feed match().
-    if match_mode and not model_path:
+    # Sweep trials may have early-stopped before the in-loop final save fired;
+    # keep a checkpoint so good sweep configs can be benchmarked or deployed.
+    if sweep_obj is not None and not model_path:
         model_path = os.path.join(checkpoint_dir, f'{pufferl.global_step:016d}.bin')
         backend.save_weights(pufferl, model_path)
     backend.close(pufferl)
@@ -374,7 +388,7 @@ def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
             result_queue.put((args['gpu_id'], [match_score],
                 [metrics['uptime'][-1]], [metrics['agent_steps'][-1]]))
         else:
-            result_queue.put((args['gpu_id'], metrics['env/score'], metrics['uptime'], metrics['agent_steps']))
+            result_queue.put((args['gpu_id'], metrics[target_key], metrics['uptime'], metrics['agent_steps']))
 
 def train(env_name, args=None, gpus=None, **kwargs):
     args = args or load_config(env_name)
@@ -450,7 +464,7 @@ def sweep(env_name, args=None, pareto=False):
         # TODO: only 1 per sweep etc
         gpu_id = next(i for i in range(sweep_gpus) if i not in active)
         timestep_total = all_timesteps[gpu_id] if pareto else None
-        if idx > 1: # First experiment uses defaults
+        if idx > 0: # First experiment uses defaults
             sweep_obj.suggest(args, fixed_total_timesteps=timestep_total)
 
         try:
@@ -656,6 +670,7 @@ def load_config(env_name):
     args['env_name'] = env_name
     for section in p.sections():
         args.setdefault(section, {})
+    sync_policy_to_env(args)
     return dict(args)
 
 def main():

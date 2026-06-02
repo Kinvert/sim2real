@@ -411,6 +411,8 @@ struct AllocEntry {
     void** data_ptr;    // address of the tensor's data field
     int64_t* shape;     // pointer to the tensor's shape array
     int elem_size;      // sizeof element type
+    long offset_bytes;  // aligned byte offset from allocator base
+    long offset_elems;  // offset_bytes / elem_size
 };
 
 struct Allocator {
@@ -423,11 +425,13 @@ struct Allocator {
 
 static void alloc_register_impl(Allocator* alloc, void** data_ptr, int64_t* shape, int elem_size) {
     alloc->regs = (AllocEntry*)realloc(alloc->regs, (alloc->num_regs + 1) * sizeof(AllocEntry));
-    alloc->regs[alloc->num_regs++] = {data_ptr, shape, elem_size};
     int64_t n = numel(shape);
+    long offset_bytes = (alloc->total_bytes + 15) & ~15;
+    assert(offset_bytes % elem_size == 0);
+    alloc->regs[alloc->num_regs++] = {
+        data_ptr, shape, elem_size, offset_bytes, offset_bytes / elem_size};
     alloc->total_elems += n;
-    alloc->total_bytes = (alloc->total_bytes + 15) & ~15;
-    alloc->total_bytes += n * elem_size;
+    alloc->total_bytes = offset_bytes + n * elem_size;
 }
 void alloc_register(Allocator* a, PrecisionTensor* t) {
     alloc_register_impl(a, (void**)&t->data, t->shape, sizeof(precision_t));
@@ -447,11 +451,8 @@ cudaError_t alloc_create(Allocator* alloc) {
     cudaError_t err = cudaMalloc(&alloc->mem, alloc->total_bytes);
     if (err != cudaSuccess) return err;
     cudaMemset(alloc->mem, 0, alloc->total_bytes);
-    long offset = 0;
     for (int i = 0; i < alloc->num_regs; i++) {
-        offset = (offset + 15) & ~15;
-        *alloc->regs[i].data_ptr = (char*)alloc->mem + offset;
-        offset += numel(alloc->regs[i].shape) * alloc->regs[i].elem_size;
+        *alloc->regs[i].data_ptr = (char*)alloc->mem + alloc->regs[i].offset_bytes;
     }
     return cudaSuccess;
 }

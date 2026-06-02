@@ -1,0 +1,446 @@
+#ifndef LINE_FOLLOW_TRACK_H
+#define LINE_FOLLOW_TRACK_H
+
+#include <math.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifndef LINE_FOLLOW_PI
+#define LINE_FOLLOW_PI 3.14159265358979323846f
+#endif
+
+#define LINE_FOLLOW_MAX_TRACK_SAMPLES 384
+#define LINE_FOLLOW_TRACK_SAMPLE_SPACING_M 0.02f
+
+#define LINE_FOLLOW_TRACK_RANDOM -1
+#define LINE_FOLLOW_TRACK_STRAIGHT 0
+#define LINE_FOLLOW_TRACK_ARC 1
+#define LINE_FOLLOW_TRACK_S_CURVE 2
+#define LINE_FOLLOW_TRACK_OVAL 3
+#define LINE_FOLLOW_TRACK_CORNER 4
+
+typedef struct {
+    float x;
+    float y;
+    float tangent_x;
+    float tangent_y;
+    float normal_x;
+    float normal_y;
+    float progress_s;
+    float line_width_m;
+    float black_reflectance;
+} LineFollowTrackSample;
+
+typedef struct {
+    LineFollowTrackSample samples[LINE_FOLLOW_MAX_TRACK_SAMPLES];
+    int sample_count;
+    int family;
+    float length_m;
+    float bounds_m;
+} LineFollowTrack;
+
+typedef struct {
+    float distance_m;
+    float signed_lateral_m;
+    float progress_s;
+    float heading_rad;
+    float line_width_m;
+    float black_reflectance;
+    int segment_idx;
+} LineFollowNearest;
+
+static inline float track_clampf(float value, float lo, float hi) {
+    if (value < lo) return lo;
+    if (value > hi) return hi;
+    return value;
+}
+
+static inline float rand01(unsigned int* rng) {
+    return (float)rand_r(rng) / (float)RAND_MAX;
+}
+
+static inline void track_begin(LineFollowTrack* track, int family, float bounds_m) {
+    memset(track, 0, sizeof(*track));
+    track->family = family;
+    track->bounds_m = bounds_m;
+}
+
+static inline bool track_push(LineFollowTrack* track, float x, float y,
+        float line_width_m, float black_reflectance) {
+    if (track->sample_count >= LINE_FOLLOW_MAX_TRACK_SAMPLES) {
+        return false;
+    }
+
+    LineFollowTrackSample* sample = &track->samples[track->sample_count++];
+    sample->x = x;
+    sample->y = y;
+    sample->line_width_m = line_width_m;
+    sample->black_reflectance = black_reflectance;
+    return true;
+}
+
+static inline bool track_finalize(LineFollowTrack* track) {
+    if (track->sample_count < 2) {
+        return false;
+    }
+
+    track->samples[0].progress_s = 0.0f;
+    for (int i = 1; i < track->sample_count; i++) {
+        float dx = track->samples[i].x - track->samples[i - 1].x;
+        float dy = track->samples[i].y - track->samples[i - 1].y;
+        float ds = sqrtf(dx * dx + dy * dy);
+        track->samples[i].progress_s = track->samples[i - 1].progress_s + ds;
+    }
+    track->length_m = track->samples[track->sample_count - 1].progress_s;
+
+    for (int i = 0; i < track->sample_count; i++) {
+        int a = i == 0 ? 0 : i - 1;
+        int b = i == track->sample_count - 1 ? i : i + 1;
+        float dx = track->samples[b].x - track->samples[a].x;
+        float dy = track->samples[b].y - track->samples[a].y;
+        float len = sqrtf(dx * dx + dy * dy);
+        if (len < 1e-6f) {
+            dx = 1.0f;
+            dy = 0.0f;
+            len = 1.0f;
+        }
+        float tx = dx / len;
+        float ty = dy / len;
+        track->samples[i].tangent_x = tx;
+        track->samples[i].tangent_y = ty;
+        track->samples[i].normal_x = -ty;
+        track->samples[i].normal_y = tx;
+    }
+
+    return track->length_m > 1e-5f;
+}
+
+static inline bool track_in_bounds(const LineFollowTrack* track, float bounds_m) {
+    if (track->sample_count < 2 || track->sample_count > LINE_FOLLOW_MAX_TRACK_SAMPLES) {
+        return false;
+    }
+
+    for (int i = 0; i < track->sample_count; i++) {
+        if (fabsf(track->samples[i].x) > bounds_m || fabsf(track->samples[i].y) > bounds_m) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static inline bool track_mirror_y(LineFollowTrack* track) {
+    for (int i = 0; i < track->sample_count; i++) {
+        track->samples[i].y = -track->samples[i].y;
+    }
+    return track_finalize(track);
+}
+
+static inline bool track_reverse(LineFollowTrack* track) {
+    for (int i = 0, j = track->sample_count - 1; i < j; i++, j--) {
+        LineFollowTrackSample tmp = track->samples[i];
+        track->samples[i] = track->samples[j];
+        track->samples[j] = tmp;
+    }
+    return track_finalize(track);
+}
+
+static inline bool generate_straight(LineFollowTrack* track, float length_m,
+        float line_width_m, float bounds_m) {
+    length_m = track_clampf(length_m, 0.2f, 2.0f * bounds_m);
+    track_begin(track, LINE_FOLLOW_TRACK_STRAIGHT, bounds_m);
+
+    int samples = (int)ceilf(length_m / LINE_FOLLOW_TRACK_SAMPLE_SPACING_M) + 1;
+    if (samples > LINE_FOLLOW_MAX_TRACK_SAMPLES) {
+        samples = LINE_FOLLOW_MAX_TRACK_SAMPLES;
+    }
+    if (samples < 2) {
+        samples = 2;
+    }
+
+    for (int i = 0; i < samples; i++) {
+        float t = samples == 1 ? 0.0f : (float)i / (float)(samples - 1);
+        float x = (t - 0.5f) * length_m;
+        if (!track_push(track, x, 0.0f, line_width_m, 1.0f)) {
+            return false;
+        }
+    }
+
+    return track_finalize(track) && track_in_bounds(track, bounds_m);
+}
+
+static inline bool generate_arc(LineFollowTrack* track, float radius_m,
+        float angle_rad, float line_width_m, float bounds_m) {
+    radius_m = track_clampf(radius_m, 0.07f, bounds_m * 0.85f);
+    angle_rad = track_clampf(angle_rad, 0.45f, 2.1f);
+    track_begin(track, LINE_FOLLOW_TRACK_ARC, bounds_m);
+
+    float length_m = radius_m * angle_rad;
+    int samples = (int)ceilf(length_m / LINE_FOLLOW_TRACK_SAMPLE_SPACING_M) + 1;
+    if (samples > LINE_FOLLOW_MAX_TRACK_SAMPLES) {
+        samples = LINE_FOLLOW_MAX_TRACK_SAMPLES;
+    }
+
+    for (int i = 0; i < samples; i++) {
+        float t = (float)i / (float)(samples - 1);
+        float phi = (t - 0.5f) * angle_rad;
+        float x = radius_m * sinf(phi);
+        float y = radius_m * (1.0f - cosf(phi));
+        if (!track_push(track, x, y, line_width_m, 1.0f)) {
+            return false;
+        }
+    }
+
+    return track_finalize(track) && track_in_bounds(track, bounds_m);
+}
+
+static inline bool generate_s_curve(LineFollowTrack* track, float length_m,
+        float amplitude_m, float line_width_m, float bounds_m) {
+    length_m = track_clampf(length_m, 0.18f, 1.7f * bounds_m);
+    amplitude_m = track_clampf(amplitude_m, 0.015f, 0.28f * bounds_m);
+    track_begin(track, LINE_FOLLOW_TRACK_S_CURVE, bounds_m);
+
+    int samples = (int)ceilf(length_m / LINE_FOLLOW_TRACK_SAMPLE_SPACING_M) + 1;
+    if (samples > LINE_FOLLOW_MAX_TRACK_SAMPLES) {
+        samples = LINE_FOLLOW_MAX_TRACK_SAMPLES;
+    }
+
+    for (int i = 0; i < samples; i++) {
+        float t = (float)i / (float)(samples - 1);
+        float x = (t - 0.5f) * length_m;
+        float y = amplitude_m * sinf(2.0f * LINE_FOLLOW_PI * t);
+        if (!track_push(track, x, y, line_width_m, 1.0f)) {
+            return false;
+        }
+    }
+
+    return track_finalize(track) && track_in_bounds(track, bounds_m);
+}
+
+static inline bool generate_oval(LineFollowTrack* track, float radius_x_m,
+        float radius_y_m, float line_width_m, float bounds_m) {
+    radius_x_m = track_clampf(radius_x_m, 0.055f, bounds_m * 0.75f);
+    radius_y_m = track_clampf(radius_y_m, 0.030f, bounds_m * 0.55f);
+    track_begin(track, LINE_FOLLOW_TRACK_OVAL, bounds_m);
+
+    float approx_len = 2.0f * LINE_FOLLOW_PI * sqrtf((radius_x_m * radius_x_m
+        + radius_y_m * radius_y_m) * 0.5f);
+    int samples = (int)ceilf(approx_len / LINE_FOLLOW_TRACK_SAMPLE_SPACING_M) + 1;
+    if (samples > LINE_FOLLOW_MAX_TRACK_SAMPLES) {
+        samples = LINE_FOLLOW_MAX_TRACK_SAMPLES;
+    }
+    if (samples < 16) {
+        samples = 16;
+    }
+
+    for (int i = 0; i < samples; i++) {
+        float t = (float)i / (float)(samples - 1);
+        float theta = 2.0f * LINE_FOLLOW_PI * t;
+        float x = radius_x_m * cosf(theta);
+        float y = radius_y_m * sinf(theta);
+        if (!track_push(track, x, y, line_width_m, 1.0f)) {
+            return false;
+        }
+    }
+
+    return track_finalize(track) && track_in_bounds(track, bounds_m);
+}
+
+static inline bool generate_corner(LineFollowTrack* track, float radius_m,
+        float angle_rad, float approach_m, float exit_m, float line_width_m,
+        float bounds_m) {
+    radius_m = track_clampf(radius_m, 0.055f, bounds_m * 0.65f);
+    angle_rad = track_clampf(angle_rad, 0.80f, 2.35f);
+    approach_m = track_clampf(approach_m, 0.08f, 0.55f * bounds_m);
+    exit_m = track_clampf(exit_m, 0.08f, 0.55f * bounds_m);
+    track_begin(track, LINE_FOLLOW_TRACK_CORNER, bounds_m);
+
+    int approach_samples = (int)ceilf(approach_m / LINE_FOLLOW_TRACK_SAMPLE_SPACING_M) + 1;
+    if (approach_samples < 2) {
+        approach_samples = 2;
+    }
+    for (int i = 0; i < approach_samples; i++) {
+        float t = (float)i / (float)(approach_samples - 1);
+        float x = -approach_m + approach_m * t;
+        if (!track_push(track, x, 0.0f, line_width_m, 1.0f)) {
+            return false;
+        }
+    }
+
+    float arc_len = radius_m * angle_rad;
+    int arc_samples = (int)ceilf(arc_len / LINE_FOLLOW_TRACK_SAMPLE_SPACING_M) + 1;
+    if (arc_samples < 2) {
+        arc_samples = 2;
+    }
+    float phi0 = -0.5f * LINE_FOLLOW_PI;
+    for (int i = 1; i < arc_samples; i++) {
+        float t = (float)i / (float)(arc_samples - 1);
+        float phi = phi0 + angle_rad * t;
+        float x = radius_m * cosf(phi);
+        float y = radius_m + radius_m * sinf(phi);
+        if (!track_push(track, x, y, line_width_m, 1.0f)) {
+            return false;
+        }
+    }
+
+    float phi1 = phi0 + angle_rad;
+    float end_x = radius_m * cosf(phi1);
+    float end_y = radius_m + radius_m * sinf(phi1);
+    float tangent_x = -sinf(phi1);
+    float tangent_y = cosf(phi1);
+    int exit_samples = (int)ceilf(exit_m / LINE_FOLLOW_TRACK_SAMPLE_SPACING_M) + 1;
+    if (exit_samples < 2) {
+        exit_samples = 2;
+    }
+    for (int i = 1; i < exit_samples; i++) {
+        float d = exit_m * (float)i / (float)(exit_samples - 1);
+        if (!track_push(track, end_x + tangent_x * d,
+                end_y + tangent_y * d, line_width_m, 1.0f)) {
+            return false;
+        }
+    }
+
+    return track_finalize(track) && track_in_bounds(track, bounds_m);
+}
+
+static inline bool generate_track(LineFollowTrack* track, unsigned int* rng,
+        int family, float line_width_m, float bounds_m) {
+    int chosen = family;
+    if (chosen == LINE_FOLLOW_TRACK_RANDOM) {
+        int bucket = (int)(rand_r(rng) % 6);
+        chosen = bucket < 2 ? LINE_FOLLOW_TRACK_CORNER : bucket - 2;
+    }
+
+    bool ok = false;
+    if (chosen == LINE_FOLLOW_TRACK_STRAIGHT) {
+        float length = 0.25f + 0.25f * rand01(rng);
+        ok = generate_straight(track, length, line_width_m, bounds_m);
+    } else if (chosen == LINE_FOLLOW_TRACK_ARC) {
+        float radius_u = rand01(rng);
+        float radius = 0.070f + 0.150f * radius_u * radius_u;
+        float angle = 0.95f + 1.05f * rand01(rng);
+        ok = generate_arc(track, radius, angle, line_width_m, bounds_m);
+    } else if (chosen == LINE_FOLLOW_TRACK_S_CURVE) {
+        float length = 0.22f + 0.28f * rand01(rng);
+        float amp = 0.035f + 0.065f * rand01(rng);
+        ok = generate_s_curve(track, length, amp, line_width_m, bounds_m);
+    } else if (chosen == LINE_FOLLOW_TRACK_OVAL) {
+        float rx_u = rand01(rng);
+        float ry_u = rand01(rng);
+        float rx = 0.060f + 0.060f * rx_u * rx_u;
+        float ry = 0.030f + 0.050f * ry_u * ry_u;
+        ok = generate_oval(track, rx, ry, line_width_m, bounds_m);
+    } else if (chosen == LINE_FOLLOW_TRACK_CORNER) {
+        float radius_u = rand01(rng);
+        float angle_u = rand01(rng);
+        float approach_u = rand01(rng);
+        float exit_u = rand01(rng);
+        float radius = 0.055f + 0.065f * radius_u * radius_u;
+        float angle = 1.10f + 0.95f * angle_u;
+        float approach = 0.11f + 0.16f * approach_u;
+        float exit = 0.11f + 0.18f * exit_u;
+        ok = generate_corner(track, radius, angle, approach, exit,
+            line_width_m, bounds_m);
+    }
+
+    if (!ok && family == LINE_FOLLOW_TRACK_RANDOM) {
+        ok = generate_s_curve(track, 0.36f, 0.04f, line_width_m, bounds_m);
+    }
+
+    if (!ok && family != LINE_FOLLOW_TRACK_RANDOM) {
+        ok = generate_straight(track, bounds_m * 1.2f, line_width_m, bounds_m);
+    }
+    if (ok && family == LINE_FOLLOW_TRACK_RANDOM) {
+        unsigned int orientation = rand_r(rng) & 3u;
+        if ((orientation & 1u) != 0u) {
+            ok = track_mirror_y(track);
+        }
+        if (ok && (orientation & 2u) != 0u) {
+            ok = track_reverse(track);
+        }
+        ok = ok && track_in_bounds(track, bounds_m);
+    }
+    return ok;
+}
+
+static inline LineFollowNearest nearest_track(const LineFollowTrack* track,
+        float x, float y) {
+    LineFollowNearest best;
+    memset(&best, 0, sizeof(best));
+    best.distance_m = 1e9f;
+    best.line_width_m = 0.006f;
+    best.black_reflectance = 1.0f;
+
+    if (track->sample_count < 2) {
+        return best;
+    }
+
+    for (int i = 0; i < track->sample_count - 1; i++) {
+        const LineFollowTrackSample* a = &track->samples[i];
+        const LineFollowTrackSample* b = &track->samples[i + 1];
+        float vx = b->x - a->x;
+        float vy = b->y - a->y;
+        float len2 = vx * vx + vy * vy;
+        if (len2 < 1e-12f) {
+            continue;
+        }
+
+        float wx = x - a->x;
+        float wy = y - a->y;
+        float t = track_clampf((wx * vx + wy * vy) / len2, 0.0f, 1.0f);
+        float px = a->x + t * vx;
+        float py = a->y + t * vy;
+        float dx = x - px;
+        float dy = y - py;
+        float dist = sqrtf(dx * dx + dy * dy);
+
+        if (dist < best.distance_m) {
+            float len = sqrtf(len2);
+            float tx = vx / len;
+            float ty = vy / len;
+            float nx = -ty;
+            float ny = tx;
+            best.distance_m = dist;
+            best.signed_lateral_m = dx * nx + dy * ny;
+            best.progress_s = a->progress_s + t * len;
+            best.heading_rad = atan2f(ty, tx);
+            best.line_width_m = a->line_width_m + t * (b->line_width_m - a->line_width_m);
+            best.black_reflectance = a->black_reflectance
+                + t * (b->black_reflectance - a->black_reflectance);
+            best.segment_idx = i;
+        }
+    }
+
+    return best;
+}
+
+static inline float line_coverage(float signed_lateral_m,
+        float line_width_m, float edge_softness_m) {
+    float dist = fabsf(signed_lateral_m);
+    float half_width = 0.5f * line_width_m;
+    if (edge_softness_m <= 1e-6f) {
+        return dist <= half_width ? 1.0f : 0.0f;
+    }
+
+    float inner = fmaxf(0.0f, half_width - edge_softness_m);
+    float outer = half_width + edge_softness_m;
+    if (dist <= inner) {
+        return 1.0f;
+    }
+    if (dist >= outer) {
+        return 0.0f;
+    }
+
+    float t = (dist - inner) / (outer - inner);
+    float smooth = t * t * (3.0f - 2.0f * t);
+    return 1.0f - smooth;
+}
+
+static inline float angle_diff(float a, float b) {
+    float d = a - b;
+    while (d > LINE_FOLLOW_PI) d -= 2.0f * LINE_FOLLOW_PI;
+    while (d < -LINE_FOLLOW_PI) d += 2.0f * LINE_FOLLOW_PI;
+    return d;
+}
+
+#endif
