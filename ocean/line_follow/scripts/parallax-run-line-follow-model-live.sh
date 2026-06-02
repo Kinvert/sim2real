@@ -9,6 +9,9 @@ SD_LOG=0
 OUT_NAME="line_follow_model_live"
 LOG_FILE=""
 HOST_TIMESTAMPS=0
+EEPROM=0
+PIN_PROFILE="${LINE_FOLLOW_QTI_PIN_PROFILE:-}"
+ELF_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -32,12 +35,32 @@ while [[ $# -gt 0 ]]; do
       HOST_TIMESTAMPS=1
       shift
       ;;
+    --eeprom)
+      EEPROM=1
+      shift
+      ;;
+    --pin-profile)
+      if [[ $# -lt 2 ]]; then
+        echo "--pin-profile requires p765 or p654" >&2
+        exit 2
+      fi
+      PIN_PROFILE="$2"
+      shift 2
+      ;;
+    --elf)
+      if [[ $# -lt 2 ]]; then
+        echo "--elf requires a path" >&2
+        exit 2
+      fi
+      ELF_OVERRIDE="$2"
+      shift 2
+      ;;
     /dev/*)
       PORT="$1"
       shift
       ;;
     *)
-      echo "Usage: $0 [--drive] [--sd-log] [--host-timestamps] [--log path] [/dev/ttyUSB0]" >&2
+      echo "Usage: $0 [--drive] [--sd-log] [--eeprom] [--pin-profile p765|p654] [--elf path] [--host-timestamps] [--log path] [/dev/ttyUSB0]" >&2
       exit 2
       ;;
   esac
@@ -50,16 +73,25 @@ if [[ "$SD_LOG" == "1" ]]; then
   OUT_NAME="${OUT_NAME}_sd"
 fi
 
-ELF="$LINE_FOLLOW_ROOT/build/line-follow/$OUT_NAME.elf"
+if [[ -n "$ELF_OVERRIDE" ]]; then
+  ELF="$ELF_OVERRIDE"
+else
+  ELF="$LINE_FOLLOW_ROOT/build/line-follow/$OUT_NAME.elf"
+fi
 
 if [[ ! -f "$ELF" ]]; then
   build_args=()
   [[ "$ENABLE_DRIVE" == "1" ]] && build_args+=(--drive)
   [[ "$SD_LOG" == "1" ]] && build_args+=(--sd-log)
+  [[ -n "$PIN_PROFILE" ]] && build_args+=(--pin-profile "$PIN_PROFILE")
   "$LINE_FOLLOW_ROOT/scripts/parallax-build-line-follow-model-live.sh" "${build_args[@]}"
 fi
 
-echo "Loading $ELF to RAM on $PORT using board $PROPELLER_LOAD_BOARD"
+if [[ "$EEPROM" == "1" ]]; then
+  echo "Loading $ELF to EEPROM on $PORT using board $PROPELLER_LOAD_BOARD"
+else
+  echo "Loading $ELF to RAM on $PORT using board $PROPELLER_LOAD_BOARD"
+fi
 if [[ "$ENABLE_DRIVE" == "1" ]]; then
   echo "WARNING: drive output is enabled. Stage the robot safely before continuing."
 else
@@ -68,18 +100,31 @@ fi
 if [[ "$SD_LOG" == "1" ]]; then
   echo "SD logging is enabled. The robot writes ${LINE_FOLLOW_SD_FILE:-lf_log.bin} on the ActivityBoard microSD card."
 fi
-echo "This reads real QTI sensors, runs the embedded model, prints raw/min/max/obs/action/ticks, and does not write EEPROM."
+if [[ -n "$PIN_PROFILE" ]]; then
+  echo "Requested QTI pin profile: $PIN_PROFILE"
+fi
+if [[ "$EEPROM" == "1" ]]; then
+  echo "This writes EEPROM, resets the robot, and enters terminal mode."
+else
+  echo "This reads real QTI sensors, runs the embedded model, prints raw/min/max/obs/action/ticks, and does not write EEPROM."
+fi
 echo "Press Ctrl-C to leave terminal mode."
+
+load_args=(-b "$PROPELLER_LOAD_BOARD" -p "$PORT")
+if [[ "$EEPROM" == "1" ]]; then
+  load_args+=(-e)
+fi
+load_args+=(-r -t "$ELF")
 
 if [[ -n "$LOG_FILE" ]]; then
   mkdir -p "$(dirname "$LOG_FILE")"
   if [[ "$HOST_TIMESTAMPS" == "1" ]]; then
-    propeller-load -b "$PROPELLER_LOAD_BOARD" -p "$PORT" -r -t "$ELF" 2>&1 \
+    propeller-load "${load_args[@]}" 2>&1 \
       | perl -MTime::HiRes=time -ne '$|=1; if (/^L /) { printf "%.6f %s", time, $_ } else { print }' \
       | tee "$LOG_FILE"
   else
-    propeller-load -b "$PROPELLER_LOAD_BOARD" -p "$PORT" -r -t "$ELF" 2>&1 | tee "$LOG_FILE"
+    propeller-load "${load_args[@]}" 2>&1 | tee "$LOG_FILE"
   fi
 else
-  exec propeller-load -b "$PROPELLER_LOAD_BOARD" -p "$PORT" -r -t "$ELF"
+  exec propeller-load "${load_args[@]}"
 fi

@@ -6,6 +6,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/parallax-env.sh"
 OUT_DIR="$LINE_FOLLOW_ROOT/build/line-follow"
 SRC="$LINE_FOLLOW_ROOT/firmware/line_follow_model_fake.c"
 HEADER="$OUT_DIR/line_follow_model_weights.h"
+REPLAY_HEADER="$OUT_DIR/line_follow_replay_cases.h"
 OUT="$OUT_DIR/line_follow_model_fake.elf"
 HIDDEN_SIZE="${LINE_FOLLOW_HIDDEN_SIZE:-$LINE_FOLLOW_HIDDEN_SIZE_DEFAULT}"
 NUM_LAYERS="${LINE_FOLLOW_NUM_LAYERS:-$LINE_FOLLOW_NUM_LAYERS_DEFAULT}"
@@ -40,6 +41,23 @@ mkdir -p "$OUT_DIR"
   "$weights" \
   "$HEADER"
 
+if [[ -n "${LINE_FOLLOW_REPLAY_CAPTURE:-}" ]]; then
+  "$SIM2REAL_ROOT/.venv/bin/python" \
+    "$LINE_FOLLOW_ROOT/scripts/generate-line-follow-replay-cases.py" \
+    "$LINE_FOLLOW_REPLAY_CAPTURE" \
+    "$REPLAY_HEADER" \
+    --source "${LINE_FOLLOW_REPLAY_SOURCE:-grouped}" \
+    --qti-map-mode "${LINE_FOLLOW_REPLAY_QTI_MAP_MODE:-three-pin}" \
+    --obs-mode "${LINE_FOLLOW_REPLAY_OBS_MODE:-normalized}" \
+    --white "${LINE_FOLLOW_REPLAY_WHITE:-80}" \
+    --black "${LINE_FOLLOW_REPLAY_BLACK:-403}" \
+    --rawdiff-gain-q1000 "${LINE_FOLLOW_REPLAY_RAWDIFF_GAIN_Q1000:-1000}" \
+    --rawdiff-span "${LINE_FOLLOW_REPLAY_RAWDIFF_SPAN:-0}" \
+    --limit "${LINE_FOLLOW_REPLAY_LIMIT:-160}" \
+    --stride "${LINE_FOLLOW_REPLAY_STRIDE:-1}" \
+    --start-row "${LINE_FOLLOW_REPLAY_START_ROW:-0}"
+fi
+
 args=(
   -Os -mcmm -m32bit-doubles -fno-exceptions -std=c99 \
   -DHIDDEN_SIZE="$HIDDEN_SIZE" \
@@ -62,6 +80,15 @@ if [[ -n "${LINE_FOLLOW_INFERENCE_MODE:-}" ]]; then
   args+=(-DLINE_FOLLOW_INFERENCE_MODE="$LINE_FOLLOW_INFERENCE_MODE")
 fi
 
+if [[ -n "${LINE_FOLLOW_REPLAY_CAPTURE:-}" ]]; then
+  args+=(
+    -DLINE_FOLLOW_FAKE_REPLAY=1
+    -DLINE_FOLLOW_FAKE_RESET_EACH_ROW="${LINE_FOLLOW_FAKE_RESET_EACH_ROW:-0}"
+  )
+elif [[ -n "${LINE_FOLLOW_FAKE_RESET_EACH_ROW:-}" ]]; then
+  args+=(-DLINE_FOLLOW_FAKE_RESET_EACH_ROW="$LINE_FOLLOW_FAKE_RESET_EACH_ROW")
+fi
+
 propeller-elf-gcc "${args[@]}" -o "$OUT" "$SRC" \
   -lsimpletools -lsimpletext -lsimplei2c -lm
 
@@ -75,4 +102,12 @@ echo "Inference mode: ${LINE_FOLLOW_INFERENCE_MODE:-auto}"
 echo "Max wheel speed: $MAX_WHEEL_SPEED_MPS m/s"
 echo "Command deadband: $COMMAND_DEADBAND"
 echo "Minimum drive ticks/sec: $MIN_DRIVE_TICKS_PER_SEC"
+if [[ -n "${LINE_FOLLOW_REPLAY_CAPTURE:-}" ]]; then
+  echo "Replay capture: $LINE_FOLLOW_REPLAY_CAPTURE"
+  echo "Replay header: $REPLAY_HEADER"
+  echo "Replay source: ${LINE_FOLLOW_REPLAY_SOURCE:-grouped}"
+  echo "Replay QTI map mode: ${LINE_FOLLOW_REPLAY_QTI_MAP_MODE:-three-pin}"
+  echo "Replay obs mode: ${LINE_FOLLOW_REPLAY_OBS_MODE:-normalized}"
+  echo "Replay reset each row: ${LINE_FOLLOW_FAKE_RESET_EACH_ROW:-0}"
+fi
 echo "This firmware runs trained-model inference on fake observations. It never reads QTI pins or drives motors."
