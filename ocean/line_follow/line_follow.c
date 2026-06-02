@@ -60,7 +60,7 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[i], "--family") == 0 && i + 1 < argc) {
             env.track_family = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--help") == 0) {
-            printf("Usage: ./line_follow [--manual] [--family -1|0|1|2|3]\n");
+            printf("Usage: ./line_follow [--manual] [--family -1|0|1|2|3|4]\n");
             printf("Controls: H toggles heuristic/manual, WASD or arrows drive in manual mode.\n");
             return 0;
         }

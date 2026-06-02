@@ -87,6 +87,35 @@ static void test_propeller_qti_normalization_parity(void) {
     }
 }
 
+static void test_rawdiff_observation_mapping(void) {
+    float obs[LINE_FOLLOW_OBS_SIZE] = {0};
+    float actions[2] = {0};
+    float rewards[1] = {0};
+    float terminals[1] = {0};
+    LineFollow env = make_test_env(obs, actions, rewards, terminals);
+    env.qti_white_time = 80.0f;
+    env.qti_black_time = 350.0f;
+    env.obs_raw_diff = 1;
+    env.obs_raw_diff_gain = 3.0f;
+    env.obs_raw_diff_span = 0.0f;
+    env.sensor_noise_std = 0.0f;
+
+    expect_true(generate_straight(&env.track, 1.0f, env.line_width_m, env.track_bounds_m),
+        "raw-diff test straight track generation succeeds");
+
+    reset_runtime_pose(&env, 0.0f, 0.09f, 0.0f);
+    compute_observations(&env);
+    expect_true(obs[0] <= 0.001f && obs[1] <= 0.001f && obs[2] <= 0.001f,
+        "raw-diff all-white observation stays all white");
+
+    reset_runtime_pose(&env, 0.0f, 0.02f, 0.0f);
+    compute_observations(&env);
+    expect_true(obs[2] > obs[0] && obs[2] > obs[1],
+        "raw-diff preserves the darker side sensor direction");
+    expect_true(obs[2] >= 0.5f,
+        "raw-diff gain can lift side-edge contrast over the black threshold");
+}
+
 static void test_continuous_actions(void) {
     float actions[2] = {-2.0f, 2.0f};
     LineFollowWheelCommand cmd = map_actions(actions, 0.5f, 0.05f,
@@ -169,6 +198,8 @@ static void test_measured_geometry_defaults(void) {
         "raw action bound penalty stays small so it does not suppress usable turn commands");
     expect_near(env.turn_penalty_scale, 0.0f, 1e-6f,
         "turn command penalty is disabled so steering itself is not punished");
+    expect_near(env.ambiguous_turn_penalty_scale, 0.0f, 1e-6f,
+        "ambiguous-observation turn penalty is opt-in from training config");
     expect_near(env.steering_correction_scale, 0.30f, 1e-6f,
         "privileged steering correction reward teaches the signed turn direction");
     expect_near(env.turn_speed_penalty_scale, 0.05f, 1e-6f,
@@ -183,6 +214,8 @@ static void test_measured_geometry_defaults(void) {
         "idle threshold pushes pivot turns to keep the outside wheel moving");
     expect_near(env.min_drive_ticks_per_sec, 6.0f, 1e-6f,
         "anti-stall wheel floor defaults to the first smooth measured slow speed");
+    expect_near(env.avg_speed_perf_target_mps, 0.18f, 1e-6f,
+        "average-speed perf target rewards sane pace without forcing top speed");
     expect_near(env.track_complete_margin_m, 0.02f, 1e-6f,
         "completion margin is scaled for paper-sized tracks");
     expect_near(env.wheel_base_m, 0.125f, 1e-6f, "measured tire-to-tire width is default wheel base");
@@ -195,6 +228,8 @@ static void test_measured_geometry_defaults(void) {
         "measured twisted sensor forward offset is default");
     expect_near(env.sensor_side_lateral_m, 0.018f, 1e-6f,
         "measured twisted side sensor lateral offset is default");
+    expect_near(env.sensor_lateral_center_m, 0.0f, 1e-6f,
+        "default three-sensor layout remains centered on the robot");
     expect_near(env.sensor_forward_jitter_m, 0.003f, 1e-6f,
         "sensor forward jitter default covers small mounting errors");
     expect_near(env.sensor_lateral_jitter_m, 0.004f, 1e-6f,
@@ -207,13 +242,15 @@ static void test_measured_geometry_defaults(void) {
         "QTI white response is randomized for training");
     expect_near(env.qti_black_jitter, 120.0f, 1e-6f,
         "QTI black response is randomized for training");
+    expect_near(env.qti_threshold, 0.20f, 1e-6f,
+        "weak real marker readings still count as line-seen in training");
     expect_near(env.line_width_jitter_m, 0.006f, 1e-6f,
         "episode line width randomization covers hand-drawn stripe thickness");
     expect_near(env.line_width_segment_jitter_m, 0.002f, 1e-6f,
         "per-track line width randomization covers uneven hand-drawn segments");
     expect_near(env.line_edge_softness_jitter_m, 0.004f, 1e-6f,
         "line edge softness is randomized for training");
-    expect_near(env.line_reflectance_noise, 0.12f, 1e-6f,
+    expect_near(env.line_reflectance_noise, 0.75f, 1e-6f,
         "line reflectance noise covers uneven hand-drawn marker darkness");
     expect_near(env.start_lateral_offset_m, 0.025f, 1e-6f,
         "start offset stays within the active sensor span");
@@ -226,6 +263,16 @@ static void test_measured_geometry_defaults(void) {
     expect_near(env.sensor_lateral[1], 0.0f, 1e-6f, "middle sensor lateral default");
     expect_near(env.sensor_forward[2], 0.0435f, 1e-6f, "right sensor forward default");
     expect_near(env.sensor_lateral[2], -0.018f, 1e-6f, "right sensor lateral default");
+
+    env.sensor_lateral_center_m = -0.009f;
+    env.sensor_lateral_jitter_m = 0.0f;
+    sensor_layout(&env);
+    expect_near(env.sensor_lateral[0], 0.009f, 1e-6f,
+        "center offset can model the P6/P5/P4 active sensor trio");
+    expect_near(env.sensor_lateral[1], -0.009f, 1e-6f,
+        "center offset shifts the middle sensor consistently");
+    expect_near(env.sensor_lateral[2], -0.027f, 1e-6f,
+        "center offset shifts the right sensor consistently");
 }
 
 static void test_episode_dt_randomization(void) {
@@ -278,11 +325,31 @@ static void test_model_timing_penalizes_larger_policy(void) {
     env.policy_hidden_size = 8;
     env.policy_num_layers = 1;
     apply_model_timing(&env);
-    expect_near(env.dt, 0.188f, 1e-6f, "H8 recurrent timing uses measured slower loop");
-    expect_near(env.dt_min, 0.115692f, 1e-5f, "H8 recurrent timing scales min dt");
-    expect_near(env.dt_max, 0.260308f, 1e-5f, "H8 recurrent timing scales max dt");
+    expect_near(env.dt, 0.192f, 1e-6f, "H8 recurrent timing uses measured slower loop");
+    expect_near(env.dt_min, 0.118154f, 1e-5f, "H8 recurrent timing scales min dt");
+    expect_near(env.dt_max, 0.265846f, 1e-5f, "H8 recurrent timing scales max dt");
     expect_true(env.max_steps == 28, "H8 recurrent reduces max steps to preserve wall-clock horizon");
     expect_true(env.lost_line_limit == 1, "H8 recurrent reduces lost-line grace to preserve wall-clock time");
+
+    memset(&env, 0, sizeof(env));
+    set_defaults(&env);
+    env.policy_hidden_size = 3;
+    env.policy_num_layers = 1;
+    apply_model_timing(&env);
+    expect_near(env.dt, 0.0165f, 1e-6f, "small recurrent timing uses measured H4/L1 drive-loop budget");
+    expect_near(env.dt_min, 0.010154f, 1e-5f, "small recurrent timing scales min dt");
+    expect_near(env.dt_max, 0.022846f, 1e-5f, "small recurrent timing scales max dt");
+    expect_true(env.max_steps == 316, "small recurrent keeps the configured wall-clock horizon");
+    expect_true(env.lost_line_limit == 7, "small recurrent scales lost-line grace to preserve wall-clock time");
+
+    memset(&env, 0, sizeof(env));
+    set_defaults(&env);
+    env.policy_hidden_size = 4;
+    env.policy_num_layers = 1;
+    apply_model_timing(&env);
+    expect_near(env.dt, 0.0165f, 1e-6f, "H4 recurrent timing shares the measured small-L1 budget");
+    expect_true(env.max_steps == 316, "H4 recurrent keeps the configured wall-clock horizon");
+    expect_true(env.lost_line_limit == 7, "H4 recurrent scales lost-line grace to preserve wall-clock time");
 
     memset(&env, 0, sizeof(env));
     set_defaults(&env);
@@ -362,22 +429,26 @@ static void test_track_generation(void) {
         "tight oval track generation succeeds");
     expect_true(track_in_bounds(&track, 1.0f),
         "tight oval track remains in bounds");
+    expect_true(generate_corner(&track, 0.060f, 2.0f, 0.15f, 0.15f, 0.006f, 1.0f),
+        "tight corner track generation succeeds");
+    expect_true(track_in_bounds(&track, 1.0f),
+        "tight corner track remains in bounds");
+    expect_true(total_track_turn(&track) > 1.5f,
+        "tight corner track contains a sharp heading transition");
 
     unsigned int rng = 123u;
     bool seen_positive_start_y = false;
     bool seen_negative_start_y = false;
     bool seen_clockwise = false;
     bool seen_counter_clockwise = false;
-    bool seen_family[4] = {false};
+    bool seen_family[5] = {false};
     for (unsigned int seed = 1; seed < 512; seed++) {
         rng = seed;
         expect_true(generate_track(&track, &rng, LINE_FOLLOW_TRACK_RANDOM, 0.006f, 1.0f),
-            "randomized curved track generation succeeds");
+            "randomized training track generation succeeds");
         expect_true(track.sample_count <= LINE_FOLLOW_MAX_TRACK_SAMPLES,
             "randomized generation respects sample cap");
-        expect_true(track.family != LINE_FOLLOW_TRACK_STRAIGHT,
-            "randomized training track generation avoids straight tracks");
-        if (track.family >= 0 && track.family < 4) {
+        if (track.family >= 0 && track.family < 5) {
             seen_family[track.family] = true;
         }
         float start_dy = track.samples[1].y - track.samples[0].y;
@@ -399,11 +470,12 @@ static void test_track_generation(void) {
         "randomized training tracks include both left and right handed starts");
     expect_true(seen_clockwise && seen_counter_clockwise,
         "randomized training tracks include both clockwise and counter-clockwise turns");
-    expect_true(!seen_family[LINE_FOLLOW_TRACK_STRAIGHT]
+    expect_true(seen_family[LINE_FOLLOW_TRACK_STRAIGHT]
             && seen_family[LINE_FOLLOW_TRACK_ARC]
             && seen_family[LINE_FOLLOW_TRACK_S_CURVE]
-            && seen_family[LINE_FOLLOW_TRACK_OVAL],
-        "randomized training distribution covers curved families but excludes straights");
+            && seen_family[LINE_FOLLOW_TRACK_OVAL]
+            && seen_family[LINE_FOLLOW_TRACK_CORNER],
+        "randomized training distribution covers straight, curved, and corner families");
 }
 
 static void test_episode_progress_starts_at_zero(void) {
@@ -417,10 +489,11 @@ static void test_episode_progress_starts_at_zero(void) {
         LINE_FOLLOW_TRACK_ARC,
         LINE_FOLLOW_TRACK_S_CURVE,
         LINE_FOLLOW_TRACK_OVAL,
+        LINE_FOLLOW_TRACK_CORNER,
         LINE_FOLLOW_TRACK_RANDOM,
     };
 
-    for (int family_idx = 0; family_idx < 5; family_idx++) {
+    for (int family_idx = 0; family_idx < 6; family_idx++) {
         env.track_family = families[family_idx];
         for (int episode = 0; episode < 64; episode++) {
             c_reset(&env);
@@ -453,13 +526,16 @@ static void test_perf_penalizes_centerline_error(void) {
     env.perf_checkpoint_count = target_checkpoints;
     env.centerline_error = 0.0f;
     env.centerline_error_sum = 0.0f;
+    env.forward_speed_sum = env.avg_speed_perf_target_mps * (float)env.tick;
     add_log(&env);
     expect_near(env.log.base_perf, 1.0f, 1e-6f,
         "full accuracy-weighted progress gives full base perf");
     expect_near(env.log.min_drive_speed_score, 0.3f, 1e-6f,
-        "default six tick anti-stall floor gives 6/20 speed score");
-    expect_near(env.log.perf, 0.3f, 1e-6f,
-        "default perf is base perf scaled by the minimum drive speed score");
+        "default six tick anti-stall floor is logged as a hardware-floor diagnostic");
+    expect_near(env.log.avg_speed_score, 1.0f, 1e-6f,
+        "target average speed gives full average-speed score");
+    expect_near(env.log.perf, 1.0f, 1e-6f,
+        "default perf is base perf scaled by actual average speed");
     expect_near(env.log.score, 0.0f, 1e-6f,
         "score logs raw episode return separately from perf");
     expect_near(env.log.progress_frac, 1.0f, 1e-6f,
@@ -485,7 +561,18 @@ static void test_perf_penalizes_centerline_error(void) {
     env.min_drive_ticks_per_sec = 20.0f;
     add_log(&env);
     expect_near(env.log.perf, 1.0f, 1e-6f,
-        "twenty tick minimum drive floor preserves full perf for a perfect episode");
+        "minimum drive floor no longer changes perf when average speed is good");
+    expect_near(env.log.min_drive_speed_score, 1.0f, 1e-6f,
+        "twenty tick minimum drive floor is still logged for diagnostics");
+
+    memset(&env.log, 0, sizeof(env.log));
+    env.min_drive_ticks_per_sec = 6.0f;
+    env.forward_speed_sum = 0.5f * env.avg_speed_perf_target_mps * (float)env.tick;
+    add_log(&env);
+    expect_near(env.log.avg_speed_score, 0.5f, 1e-6f,
+        "half target average speed gives half speed score");
+    expect_near(env.log.perf, 0.5f, 1e-6f,
+        "average-speed score, not hardware floor, scales perf");
 
     memset(&env.log, 0, sizeof(env.log));
     env.min_drive_ticks_per_sec = 6.0f;
@@ -497,9 +584,41 @@ static void test_perf_penalizes_centerline_error(void) {
     env.perf_checkpoint_count = target_checkpoints;
     env.centerline_error = 2.0f * env.sensor_side_lateral_m;
     env.centerline_error_sum = 2.0f * env.sensor_side_lateral_m * 10.0f;
+    env.forward_speed_sum = env.avg_speed_perf_target_mps * (float)env.tick;
     add_log(&env);
     expect_near(env.log.perf, 0.0f, 1e-6f,
         "zero effective progress gives zero perf even with full raw progress");
+
+    memset(&env.log, 0, sizeof(env.log));
+    env.tick = 10;
+    env.episode_progress = perf_target_progress_m(&env);
+    env.effective_progress_m = env.episode_progress;
+    env.center_path_m = env.episode_progress;
+    env.perf_quality_sum = (float)target_checkpoints;
+    env.perf_checkpoint_count = target_checkpoints;
+    env.centerline_error = 0.0f;
+    env.centerline_error_sum = 0.0f;
+    env.min_drive_ticks_per_sec = 20.0f;
+    env.terminal_lost_line = 1.0f;
+    env.episode_return = 42.0f;
+    add_log(&env);
+    expect_near(env.log.perf, 0.0f, 1e-6f,
+        "lost-line terminal zeroes perf despite prior good progress");
+    expect_near(env.log.score, -1.0f, 1e-6f,
+        "lost-line terminal logs the run score as the off-track penalty");
+    expect_near(env.log.episode_return, -1.0f, 1e-6f,
+        "lost-line terminal logs the run return as the off-track penalty");
+    expect_near(env.log.base_perf, 0.0f, 1e-6f,
+        "lost-line terminal zeroes base perf despite prior good progress");
+    expect_near(env.log.progress_frac, 0.0f, 1e-6f,
+        "lost-line terminal zeroes progress score despite prior good progress");
+    expect_near(env.log.checkpoint_accuracy, 0.0f, 1e-6f,
+        "lost-line terminal zeroes checkpoint accuracy for sweep selection");
+    expect_near(env.log.effective_progress_m, 0.0f, 1e-6f,
+        "lost-line terminal zeroes scored effective progress meters");
+    expect_near(env.log.progress_m, env.episode_progress, 1e-6f,
+        "lost-line terminal still logs raw progress meters for debugging");
+    env.terminal_lost_line = 0.0f;
 }
 
 static void test_continuous_progress_quality(void) {
@@ -596,20 +715,66 @@ static void test_continuous_progress_and_motion_rewards(void) {
         "far-off progress adds no effective progress");
 
     float stopped = compute_reward(&env, 0.0f, 0.0f, 0.0f, true, 0.0f,
-        0.0f, 0.0f, 0.0f, true, 0.0f, 0.0f);
+        0.0f, 0.0f, 0.0f, 0.0f, true, 0.0f, 0.0f);
     expect_near(stopped, -env.time_penalty - env.idle_penalty, 1e-6f,
         "centered stopped robot gets time and idle penalties");
 
     float straight = compute_reward(&env, 0.0f, 0.0f, 0.0f, true, 0.0f,
-        0.0f, 0.0f, 0.0f, false, 0.0f, 0.0f);
+        0.0f, 0.0f, 0.0f, 0.0f, false, 0.0f, 0.0f);
     float turning = compute_reward(&env, 0.0f, 0.0f, 0.0f, true, 0.0f,
-        0.0f, 0.0f, 1.0f, false, 0.0f, 0.0f);
+        0.0f, 0.0f, 0.0f, 1.0f, false, 0.0f, 0.0f);
     expect_near(straight, turning, 1e-6f,
         "turning is not directly penalized");
+    env.action_smoothness_penalty = 0.05f;
+    float action_jump = compute_reward(&env, 0.0f, 0.0f, 0.0f, true, 0.0f,
+        2.0f, 0.0f, 0.0f, 0.0f, false, 0.0f, 0.0f);
+    expect_near(action_jump, straight - 0.10f, 1e-6f,
+        "action smoothness penalty subtracts reward for command jumps");
+    env.action_smoothness_penalty = 0.0f;
+    float saved_steering_correction_scale = env.steering_correction_scale;
+    env.steering_correction_scale = 0.0f;
+    env.turn_penalty_scale = 0.05f;
+    float centered_turn_penalty = compute_reward(&env, 0.0f, 0.0f, 0.0f, true, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f, false, 0.0f, 0.0f);
+    float edge_turn_penalty = compute_reward(&env, 0.0f, env.sensor_side_lateral_m,
+        0.0f, true, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, false, 0.0f, 0.0f);
+    expect_near(centered_turn_penalty, straight - env.turn_penalty_scale, 1e-6f,
+        "centered turn penalty discourages spinning on the middle sensor");
+    expect_near(edge_turn_penalty, straight, 1e-6f,
+        "centered turn penalty fades out at side-sensor error");
+    env.turn_penalty_scale = 0.0f;
+    env.ambiguous_turn_penalty_scale = 0.10f;
+    env.sensor_obs[LINE_FOLLOW_LEFT] = 0.0f;
+    env.sensor_obs[LINE_FOLLOW_MIDDLE] = 0.20f;
+    env.sensor_obs[LINE_FOLLOW_RIGHT] = 0.0f;
+    float weak_center_weight = ambiguous_observation_turn_weight(&env);
+    float weak_center_turn_penalty = compute_reward(&env, 0.0f, 0.0f, 0.0f,
+        true, 0.0f, 0.0f, 0.0f, weak_center_weight, 1.0f, false, 0.0f, 0.0f);
+    env.sensor_obs[LINE_FOLLOW_LEFT] = 0.80f;
+    env.sensor_obs[LINE_FOLLOW_MIDDLE] = 0.20f;
+    env.sensor_obs[LINE_FOLLOW_RIGHT] = 0.0f;
+    float lateral_evidence_weight = ambiguous_observation_turn_weight(&env);
+    float lateral_evidence_turn = compute_reward(&env, 0.0f, 0.0f, 0.0f,
+        true, 0.0f, 0.0f, 0.0f, lateral_evidence_weight, 1.0f, false, 0.0f, 0.0f);
+    env.sensor_obs[LINE_FOLLOW_LEFT] = 0.0f;
+    env.sensor_obs[LINE_FOLLOW_MIDDLE] = 0.0f;
+    env.sensor_obs[LINE_FOLLOW_RIGHT] = 0.0f;
+    float all_white_weight = ambiguous_observation_turn_weight(&env);
+    float all_white_turn = compute_reward(&env, 0.0f, 0.0f, 0.0f,
+        true, 0.0f, 0.0f, 0.0f, all_white_weight, 1.0f, false, 0.0f, 0.0f);
+    expect_near(weak_center_turn_penalty,
+        straight - env.ambiguous_turn_penalty_scale, 1e-6f,
+        "ambiguous visible line observations discourage invented turns");
+    expect_near(lateral_evidence_turn, straight, 1e-6f,
+        "ambiguous turn penalty does not suppress asymmetric side evidence");
+    expect_near(all_white_turn, straight, 1e-6f,
+        "ambiguous turn penalty does not hard-code all-white recovery");
+    env.ambiguous_turn_penalty_scale = 0.0f;
+    env.steering_correction_scale = saved_steering_correction_scale;
     float correcting_right = compute_reward(&env, 0.0f, 0.020f, 0.0f, true, 0.0f,
-        0.0f, 0.0f, -1.0f, false, 0.0f, 0.0f);
+        0.0f, 0.0f, 0.0f, -1.0f, false, 0.0f, 0.0f);
     float turning_left_when_right_needed = compute_reward(&env, 0.0f, 0.020f, 0.0f, true, 0.0f,
-        0.0f, 0.0f, 1.0f, false, 0.0f, 0.0f);
+        0.0f, 0.0f, 0.0f, 1.0f, false, 0.0f, 0.0f);
     expect_true(correcting_right > turning_left_when_right_needed,
         "privileged centerline error rewards turning toward the line");
 
@@ -617,14 +782,14 @@ static void test_continuous_progress_and_motion_rewards(void) {
     float half_tick_progress = 0.5f * full_tick_progress;
 
     float pre_checkpoint = compute_reward(&env, half_tick_progress, 0.0f, 0.0f, true, 0.1f,
-        0.0f, 0.0f, 0.0f, false, 0.0f, 0.0f);
+        0.0f, 0.0f, 0.0f, 0.0f, false, 0.0f, 0.0f);
     expect_near(pre_checkpoint, 0.5f * env.progress_reward_scale - env.time_penalty, 1e-6f,
         "forward progress receives normalized dense reward before a checkpoint");
 
     float full_progress_centered = compute_reward(&env, full_tick_progress, 0.0f, 0.0f, true, 0.1f,
-        0.0f, reward_centerline_score(&env, 0.0f), 0.0f, false, 0.0f, 0.0f);
+        0.0f, reward_centerline_score(&env, 0.0f), 0.0f, 0.0f, false, 0.0f, 0.0f);
     float full_progress_off_center = compute_reward(&env, full_tick_progress, 0.020f, 0.0f, true, 0.1f,
-        0.0f, reward_centerline_score(&env, 0.020f), 0.0f, false, 0.0f, 0.0f);
+        0.0f, reward_centerline_score(&env, 0.020f), 0.0f, 0.0f, false, 0.0f, 0.0f);
     expect_true(full_progress_centered > full_progress_off_center,
         "continuous progress reward is scaled by centerline quality");
     expect_near(full_progress_centered,
@@ -633,9 +798,9 @@ static void test_continuous_progress_and_motion_rewards(void) {
         "full-tick centered reward is normalized progress minus time penalty");
 
     float bounded = compute_reward(&env, 0.0f, 0.0f, 0.0f, true, 0.1f,
-        0.0f, 0.0f, 0.0f, false, 0.0f, 0.0f);
+        0.0f, 0.0f, 0.0f, 0.0f, false, 0.0f, 0.0f);
     float out_of_bounds = compute_reward(&env, 0.0f, 0.0f, 0.0f, true, 0.1f,
-        0.0f, 0.0f, 0.0f, false, 0.0f, 2.0f);
+        0.0f, 0.0f, 0.0f, 0.0f, false, 0.0f, 2.0f);
     expect_true(out_of_bounds < bounded,
         "raw actions outside the policy contract receive a soft penalty");
 }
@@ -658,6 +823,8 @@ static void test_sensor_and_reward_behavior(void) {
         "centered measured sensor layout puts the middle sensor on the line");
     expect_true(line_visible_to_sensor_array(&env),
         "centered line under the middle sensor is visible to the array");
+    expect_true(line_seen_by_qti(&env),
+        "centered line under the middle sensor is visible in QTI observations");
 
     reset_runtime_pose(&env, 0.0f, 0.02f, 0.0f);
     compute_observations(&env);
@@ -676,10 +843,11 @@ static void test_sensor_and_reward_behavior(void) {
         "line fully right of the right sensor is treated as lost");
 
     for (int i = 0; i < LINE_FOLLOW_OBS_SIZE; i++) {
-        env.observations[i] = 1.0f;
+        env.sensor_obs[i] = 0.0f;
+        env.observations[i] = 0.0f;
     }
-    expect_true(!line_visible_to_sensor_array(&env),
-        "lost-line terminal geometry does not depend on sensor observations");
+    expect_true(!line_seen_by_qti(&env),
+        "all-white QTI observations are treated as not seeing the line");
 
     reset_runtime_pose(&env, 0.0f, -0.09f, 0.0f);
     compute_observations(&env);
@@ -692,9 +860,9 @@ static void test_sensor_and_reward_behavior(void) {
     float near_bonus = accuracy_score(&env, 0.0f);
     float far_bonus = accuracy_score(&env, 0.04f);
     float near_reward = compute_reward(&env, 0.025f, 0.0f, 0.0f, true, 0.1f,
-        0.0f, near_bonus, 0.0f, false, 0.0f, 0.0f);
+        0.0f, near_bonus, 0.0f, 0.0f, false, 0.0f, 0.0f);
     float far_reward = compute_reward(&env, 0.025f, 0.04f, 0.0f, true, 0.1f,
-        0.0f, far_bonus, 0.0f, false, 0.0f, 0.0f);
+        0.0f, far_bonus, 0.0f, 0.0f, false, 0.0f, 0.0f);
     expect_true(near_reward > far_reward,
         "reward changes with privileged centerline distance even when observations are ambiguous");
 }
@@ -878,6 +1046,7 @@ static void test_off_track_terminal_penalty(void) {
     env.too_far_m = 10.0f;
     env.off_track_terminal_penalty = 0.75f;
     reset_centered_straight_episode(&env);
+    env.episode_return = 12.0f;
     reset_runtime_pose(&env, env.track.samples[0].x,
         env.track.samples[0].y + 0.08f, 0.0f);
     compute_observations(&env);
@@ -891,7 +1060,11 @@ static void test_off_track_terminal_penalty(void) {
     expect_near(env.log.terminal_lost_line, 1.0f, 1e-6f,
         "lost line terminal is logged");
     expect_near(env.log.episode_return, -0.75f, 1e-6f,
-        "logged return includes the terminal off-track penalty");
+        "logged return is exactly the terminal off-track penalty");
+    expect_near(env.log.score, -0.75f, 1e-6f,
+        "logged score is exactly the terminal off-track penalty");
+    expect_near(env.log.perf, 0.0f, 1e-6f,
+        "lost line terminal logs zero perf");
 }
 
 static void test_reward_clamp_and_reset_start_visibility(void) {
@@ -907,8 +1080,9 @@ static void test_reward_clamp_and_reset_start_visibility(void) {
         c_reset(&env);
         expect_true(line_visible_to_sensor_array(&env),
             "random reset starts with the line inside the active sensor span");
-        expect_true(env.track.family != LINE_FOLLOW_TRACK_STRAIGHT,
-            "random reset avoids straight tracks for training");
+        expect_true(env.track.family >= LINE_FOLLOW_TRACK_STRAIGHT
+                && env.track.family <= LINE_FOLLOW_TRACK_CORNER,
+            "random reset chooses a supported training track family");
     }
 
     expect_true(generate_straight(&env.track, 1.0f, env.line_width_m, env.track_bounds_m),
@@ -958,7 +1132,7 @@ static void test_randomized_sensor_response_clamps_observations(void) {
         for (int i = 0; i < env.track.sample_count; i++) {
             expect_true(env.track.samples[i].line_width_m >= 0.004f,
                 "randomized per-segment line width stays positive");
-            expect_true(env.track.samples[i].black_reflectance >= 0.65f,
+            expect_true(env.track.samples[i].black_reflectance >= 0.50f,
                 "randomized per-segment line reflectance stays dark enough");
             expect_true(env.track.samples[i].black_reflectance <= 1.0f,
                 "randomized per-segment line reflectance does not exceed black calibration");
@@ -1017,7 +1191,7 @@ static void test_line_reflectance_noise_varies_track_samples(void) {
 
     env.rng = 456u;
     env.track_family = LINE_FOLLOW_TRACK_S_CURVE;
-    env.line_reflectance_noise = 0.12f;
+    env.line_reflectance_noise = 0.75f;
     c_reset(&env);
 
     float min_reflectance = 1e9f;
@@ -1030,7 +1204,7 @@ static void test_line_reflectance_noise_varies_track_samples(void) {
 
     expect_true(max_reflectance - min_reflectance > 0.003f,
         "line reflectance noise changes marker darkness inside an episode");
-    expect_true(min_reflectance >= 0.88f - 1e-6f,
+    expect_true(min_reflectance >= 0.25f - 1e-6f,
         "line reflectance noise respects the lower configured range");
     expect_true(max_reflectance <= 1.0f + 1e-6f,
         "line reflectance noise respects the upper configured range");
@@ -1067,6 +1241,7 @@ static void test_line_reflectance_noise_varies_track_samples(void) {
 int main(void) {
     test_qti_normalization();
     test_propeller_qti_normalization_parity();
+    test_rawdiff_observation_mapping();
     test_continuous_actions();
     test_measured_geometry_defaults();
     test_episode_dt_randomization();

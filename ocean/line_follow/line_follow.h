@@ -30,6 +30,7 @@ struct Log {
     float perf;
     float base_perf;
     float min_drive_speed_score;
+    float avg_speed_score;
     float score;
     float progress_frac;
     float distance_progress_frac;
@@ -49,6 +50,7 @@ struct Log {
     float avg_speed_frac;
     float idle_frac;
     float turn_outer_speed_frac;
+    float turn_sign_flip_frac;
     float qti_no_black_frac;
     float qti_weak_line_frac;
     float qti_pair_weak_frac;
@@ -120,6 +122,7 @@ struct LineFollow {
     float motor_lag_alpha;
     float command_deadband;
     float min_drive_ticks_per_sec;
+    float avg_speed_perf_target_mps;
     float left_speed_scale;
     float right_speed_scale;
 
@@ -143,6 +146,8 @@ struct LineFollow {
     float forward_speed_sum;
     float speed_frac_sum;
     float turn_outer_speed_frac_sum;
+    int prev_turn_sign;
+    int turn_sign_flip_steps;
     float action_bound_violation_sum;
     float raw_action_abs_sum;
     float centerline_error;
@@ -168,6 +173,7 @@ struct LineFollow {
     float action_smoothness_penalty;
     float action_bound_penalty_scale;
     float turn_penalty_scale;
+    float ambiguous_turn_penalty_scale;
     float steering_correction_scale;
     float turn_speed_penalty_scale;
     float min_turn_outer_action;
@@ -180,6 +186,7 @@ struct LineFollow {
 
     float sensor_forward_m;
     float sensor_side_lateral_m;
+    float sensor_lateral_center_m;
     float sensor_lateral_jitter_m;
     float sensor_forward_jitter_m;
     float sensor_noise_std;
@@ -201,6 +208,9 @@ struct LineFollow {
     float qti_white_jitter;
     float qti_black_jitter;
     float qti_timeout;
+    int obs_raw_diff;
+    float obs_raw_diff_gain;
+    float obs_raw_diff_span;
     float line_width_m;
     float line_width_jitter_m;
     float line_width_segment_jitter_m;
@@ -253,6 +263,7 @@ void set_defaults(LineFollow* env) {
     env->motor_lag_alpha = 0.65f;
     env->command_deadband = 0.04f;
     env->min_drive_ticks_per_sec = 6.0f;
+    env->avg_speed_perf_target_mps = 0.18f;
     env->left_speed_scale = 1.0f;
     env->right_speed_scale = 1.0f;
 
@@ -266,6 +277,7 @@ void set_defaults(LineFollow* env) {
     env->action_smoothness_penalty = 0.0f;
     env->action_bound_penalty_scale = 0.01f;
     env->turn_penalty_scale = 0.0f;
+    env->ambiguous_turn_penalty_scale = 0.0f;
     env->steering_correction_scale = 0.30f;
     env->turn_speed_penalty_scale = 0.05f;
     env->min_turn_outer_action = 0.65f;
@@ -278,21 +290,25 @@ void set_defaults(LineFollow* env) {
 
     env->sensor_forward_m = 0.0435f;
     env->sensor_side_lateral_m = 0.018f;
+    env->sensor_lateral_center_m = 0.0f;
     env->sensor_lateral_jitter_m = 0.004f;
     env->sensor_forward_jitter_m = 0.003f;
     env->sensor_noise_std = 0.0f;
-    env->qti_threshold = 0.5f;
+    env->qti_threshold = 0.20f;
     env->qti_white_time = 40.0f;
     env->qti_black_time = 350.0f;
     env->qti_white_jitter = 25.0f;
     env->qti_black_jitter = 120.0f;
     env->qti_timeout = 2500.0f;
+    env->obs_raw_diff = 0;
+    env->obs_raw_diff_gain = 1.0f;
+    env->obs_raw_diff_span = 0.0f;
     env->line_width_m = 0.018f;
     env->line_width_jitter_m = 0.006f;
     env->line_width_segment_jitter_m = 0.002f;
     env->line_edge_softness_m = 0.006f;
     env->line_edge_softness_jitter_m = 0.004f;
-    env->line_reflectance_noise = 0.12f;
+    env->line_reflectance_noise = 0.75f;
     env->episode_line_width_m = env->line_width_m;
     env->episode_line_edge_softness_m = env->line_edge_softness_m;
     env->track_bounds_m = 1.0f;
@@ -300,9 +316,9 @@ void set_defaults(LineFollow* env) {
     env->start_heading_offset_rad = 0.261799f;
 
     const float lateral[LINE_FOLLOW_SENSOR_COUNT] = {
-        env->sensor_side_lateral_m,
-        0.0f,
-        -env->sensor_side_lateral_m,
+        env->sensor_lateral_center_m + env->sensor_side_lateral_m,
+        env->sensor_lateral_center_m,
+        env->sensor_lateral_center_m - env->sensor_side_lateral_m,
     };
     for (int i = 0; i < LINE_FOLLOW_SENSOR_COUNT; i++) {
         env->sensor_gain[i] = 1.0f;
@@ -335,6 +351,8 @@ void init(LineFollow* env) {
     env->forward_speed_sum = 0.0f;
     env->speed_frac_sum = 0.0f;
     env->turn_outer_speed_frac_sum = 0.0f;
+    env->prev_turn_sign = 0;
+    env->turn_sign_flip_steps = 0;
     env->action_bound_violation_sum = 0.0f;
     env->raw_action_abs_sum = 0.0f;
     env->centerline_error = 0.0f;
@@ -458,15 +476,29 @@ static inline float episode_min_drive_speed_score(LineFollow* env) {
         0.0f, 1.0f);
 }
 
+static inline float episode_avg_speed_score(LineFollow* env) {
+    if (env->avg_speed_perf_target_mps <= 1e-6f) {
+        return 1.0f;
+    }
+    float episode_length = (float)env->tick;
+    if (episode_length <= 0.0f) {
+        return 0.0f;
+    }
+    float avg_forward_speed = env->forward_speed_sum / episode_length;
+    return clampf(avg_forward_speed / env->avg_speed_perf_target_mps, 0.0f, 1.0f);
+}
+
 static inline float episode_perf_score(LineFollow* env) {
     return episode_progress_accuracy_perf_score(env)
-        * episode_min_drive_speed_score(env);
+        * episode_avg_speed_score(env);
 }
 
 void add_log(LineFollow* env) {
     float episode_length = (float)env->tick;
     float mean_error = episode_length > 0.0f ? env->centerline_error_sum / episode_length : 0.0f;
     float target_progress = perf_target_progress_m(env);
+    bool off_track_failure = env->terminal_lost_line > 0.0f
+        || env->terminal_too_far > 0.0f;
     float distance_progress_frac = target_progress > 1e-6f
         ? clampf(env->episode_progress / target_progress, 0.0f, 1.0f)
         : 0.0f;
@@ -476,7 +508,18 @@ void add_log(LineFollow* env) {
     float checkpoint_accuracy = episode_checkpoint_accuracy(env);
     float base_perf = episode_progress_accuracy_perf_score(env);
     float min_drive_speed_score = episode_min_drive_speed_score(env);
-    float perf = base_perf * min_drive_speed_score;
+    float avg_speed_score = episode_avg_speed_score(env);
+    float perf = base_perf * avg_speed_score;
+    float logged_episode_return = env->episode_return;
+    if (off_track_failure) {
+        progress_frac = 0.0f;
+        distance_progress_frac = 0.0f;
+        checkpoint_accuracy = 0.0f;
+        base_perf = 0.0f;
+        perf = 0.0f;
+        logged_episode_return = clampf(
+            -fabsf(env->off_track_terminal_penalty), -1.0f, 0.0f);
+    }
     float path_efficiency = env->center_path_m > 1e-6f
         ? clampf(env->episode_progress / env->center_path_m, 0.0f, 1.0f)
         : 0.0f;
@@ -491,6 +534,9 @@ void add_log(LineFollow* env) {
         : 0.0f;
     float turn_outer_speed_frac = env->turn_step_count > 0
         ? env->turn_outer_speed_frac_sum / (float)env->turn_step_count
+        : 0.0f;
+    float turn_sign_flip_frac = episode_length > 0.0f
+        ? (float)env->turn_sign_flip_steps / episode_length
         : 0.0f;
     float qti_no_black_frac = episode_length > 0.0f
         ? (float)env->qti_no_black_steps / episode_length
@@ -514,14 +560,15 @@ void add_log(LineFollow* env) {
     env->log.perf += perf;
     env->log.base_perf += base_perf;
     env->log.min_drive_speed_score += min_drive_speed_score;
-    env->log.score += env->episode_return;
+    env->log.avg_speed_score += avg_speed_score;
+    env->log.score += logged_episode_return;
     env->log.progress_frac += progress_frac;
     env->log.distance_progress_frac += distance_progress_frac;
     env->log.progress_m += env->episode_progress;
-    env->log.effective_progress_m += env->effective_progress_m;
+    env->log.effective_progress_m += off_track_failure ? 0.0f : env->effective_progress_m;
     env->log.center_path_m += env->center_path_m;
     env->log.path_efficiency += path_efficiency;
-    env->log.episode_return += env->episode_return;
+    env->log.episode_return += logged_episode_return;
     env->log.episode_length += episode_length;
     env->log.centerline_error += mean_error;
     env->log.accuracy += current_accuracy;
@@ -533,6 +580,7 @@ void add_log(LineFollow* env) {
     env->log.avg_speed_frac += avg_speed_frac;
     env->log.idle_frac += idle_frac;
     env->log.turn_outer_speed_frac += turn_outer_speed_frac;
+    env->log.turn_sign_flip_frac += turn_sign_flip_frac;
     env->log.qti_no_black_frac += qti_no_black_frac;
     env->log.qti_weak_line_frac += qti_weak_line_frac;
     env->log.qti_pair_weak_frac += qti_pair_weak_frac;
@@ -585,11 +633,14 @@ static inline float estimate_policy_dt(int hidden_size, int num_layers) {
         return 0.0065f;
     }
 
-    if (h <= 2) return 0.070f;
-    if (h <= 4) return 0.105f;
-    if (h <= 8) return 0.188f;
+    /*
+     * H4/L1 fixed recurrent policy measured on the robot with PASM QTI and
+     * abdrive calls at roughly 16.3 ms body time / 17.6 ms host period.
+     */
+    if (h <= 4) return 0.0165f;
+    if (h <= 8) return 0.192f;
     if (h <= 16) {
-        return 0.188f + (0.477f - 0.188f) * (float)(h - 8) / 8.0f;
+        return 0.192f + (0.477f - 0.192f) * (float)(h - 8) / 8.0f;
     }
     return 0.477f + 0.040f * (float)(h - 16);
 }
@@ -598,7 +649,7 @@ static inline int scale_step_limit_for_dt(int steps, float reference_dt, float d
     if (steps <= 1 || reference_dt <= 0.0f || dt <= 0.0f) {
         return steps;
     }
-    int scaled = (int)ceilf((float)steps * reference_dt / dt);
+    int scaled = (int)ceilf((float)steps * reference_dt / dt - 1e-4f);
     return scaled < 1 ? 1 : scaled;
 }
 
@@ -700,7 +751,7 @@ static inline void jitter_episode_track_line_widths(LineFollow* env) {
 }
 
 static inline void jitter_episode_track_reflectance(LineFollow* env) {
-    float amplitude = clampf(env->line_reflectance_noise, 0.0f, 0.35f);
+    float amplitude = clampf(env->line_reflectance_noise, 0.0f, 0.90f);
     if (amplitude <= 0.0f) {
         return;
     }
@@ -721,9 +772,9 @@ static inline void jitter_episode_track_samples(LineFollow* env) {
 
 static inline void sensor_layout(LineFollow* env) {
     const float lateral[LINE_FOLLOW_SENSOR_COUNT] = {
-        env->sensor_side_lateral_m,
-        0.0f,
-        -env->sensor_side_lateral_m,
+        env->sensor_lateral_center_m + env->sensor_side_lateral_m,
+        env->sensor_lateral_center_m,
+        env->sensor_lateral_center_m - env->sensor_side_lateral_m,
     };
 
     for (int i = 0; i < LINE_FOLLOW_SENSOR_COUNT; i++) {
@@ -816,11 +867,23 @@ float record_progress_metrics(LineFollow* env, float progress_delta,
     return 0.0f;
 }
 
+static inline float ambiguous_observation_turn_weight(LineFollow* env) {
+    float left_obs = env->sensor_obs[LINE_FOLLOW_LEFT];
+    float middle_obs = env->sensor_obs[LINE_FOLLOW_MIDDLE];
+    float right_obs = env->sensor_obs[LINE_FOLLOW_RIGHT];
+    float evidence = fmaxf(middle_obs, fmaxf(left_obs, right_obs));
+    float side_diff = fabsf(left_obs - right_obs);
+    float span = fmaxf(env->qti_threshold, 0.05f);
+    float line_like_weight = clampf(evidence / span, 0.0f, 1.0f);
+    float balanced_weight = 1.0f - clampf(side_diff / span, 0.0f, 1.0f);
+    return line_like_weight * balanced_weight;
+}
+
 float compute_reward(LineFollow* env, float progress_delta, float centerline_error,
         float heading_error, bool line_seen, float forward_speed, float action_delta,
-        float centerline_milestone_reward, float signed_turn, bool idle,
-        float negative_action_amount, float action_bound_violation) {
-    (void)action_delta;
+        float centerline_milestone_reward, float ambiguous_turn_weight,
+        float signed_turn, bool idle, float negative_action_amount,
+        float action_bound_violation) {
     (void)centerline_milestone_reward;
     float reward = 0.0f;
     if (progress_delta != 0.0f) {
@@ -837,6 +900,17 @@ float compute_reward(LineFollow* env, float progress_delta, float centerline_err
         float alignment = clampf(desired_turn * signed_turn, -1.0f, 1.0f);
         reward += env->steering_correction_scale * correction_need * alignment;
     }
+    if (env->turn_penalty_scale > 0.0f) {
+        float centered_weight = 1.0f - clampf(
+            fabsf(centerline_error) / fmaxf(env->sensor_side_lateral_m, 1e-6f),
+            0.0f, 1.0f);
+        reward -= env->turn_penalty_scale * centered_weight * fabsf(signed_turn);
+    }
+    if (env->ambiguous_turn_penalty_scale > 0.0f) {
+        reward -= env->ambiguous_turn_penalty_scale
+            * ambiguous_turn_weight * fabsf(signed_turn);
+    }
+    reward -= env->action_smoothness_penalty * action_delta;
     reward -= env->time_penalty;
     reward -= fabsf(centerline_error) * env->centerline_penalty_scale;
     reward -= fabsf(heading_error) * env->heading_penalty_scale;
@@ -882,6 +956,26 @@ void compute_observations(LineFollow* env) {
         env->sensor_bits[i] = env->sensor_obs[i] >= env->qti_threshold ? 1 : 0;
     }
 
+    if (env->obs_raw_diff) {
+        float baseline = env->sensor_raw[0];
+        float span = env->obs_raw_diff_span;
+        if (span <= 0.0f) {
+            span = env->qti_black_time - env->qti_white_time;
+        }
+        if (span <= 0.0f) {
+            span = 1.0f;
+        }
+        for (int i = 1; i < LINE_FOLLOW_SENSOR_COUNT; i++) {
+            baseline = fminf(baseline, env->sensor_raw[i]);
+        }
+        for (int i = 0; i < LINE_FOLLOW_SENSOR_COUNT; i++) {
+            float obs = (env->sensor_raw[i] - baseline) / span;
+            obs *= env->obs_raw_diff_gain;
+            env->sensor_obs[i] = clampf(obs, 0.0f, 1.0f);
+            env->sensor_bits[i] = env->sensor_obs[i] >= env->qti_threshold ? 1 : 0;
+        }
+    }
+
     env->observations[0] = env->sensor_obs[LINE_FOLLOW_LEFT];
     env->observations[1] = env->sensor_obs[LINE_FOLLOW_MIDDLE];
     env->observations[2] = env->sensor_obs[LINE_FOLLOW_RIGHT];
@@ -907,6 +1001,15 @@ static inline void record_qti_domain_metrics(LineFollow* env) {
             env->qti_pair_weak_steps += 1;
         }
     }
+}
+
+static inline bool line_seen_by_qti(LineFollow* env) {
+    for (int i = 0; i < LINE_FOLLOW_SENSOR_COUNT; i++) {
+        if (env->sensor_obs[i] >= env->qti_threshold) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool line_visible_to_sensor_array(LineFollow* env) {
@@ -978,6 +1081,8 @@ void c_reset(LineFollow* env) {
     env->forward_speed_sum = 0.0f;
     env->speed_frac_sum = 0.0f;
     env->turn_outer_speed_frac_sum = 0.0f;
+    env->prev_turn_sign = 0;
+    env->turn_sign_flip_steps = 0;
     env->action_bound_violation_sum = 0.0f;
     env->raw_action_abs_sum = 0.0f;
     env->last_reward = 0.0f;
@@ -1052,6 +1157,7 @@ void c_step(LineFollow* env) {
     if (negative_action_amount > 0.0f) {
         env->negative_action_steps += 1;
     }
+    float ambiguous_turn_weight = ambiguous_observation_turn_weight(env);
 
     float alpha = clampf(env->motor_lag_alpha, 0.0f, 1.0f);
     env->v_left += alpha * (env->v_left_cmd - env->v_left);
@@ -1096,7 +1202,7 @@ void c_step(LineFollow* env) {
     env->heading_error = angle_diff(env->robot_theta, nearest.heading_rad);
     env->centerline_error_sum += fabsf(env->centerline_error);
 
-    bool line_seen = line_visible_to_sensor_array(env);
+    bool line_seen = line_seen_by_qti(env);
     env->lost_line_steps = line_seen ? 0 : env->lost_line_steps + 1;
 
     float action_delta = fabsf(cmd.left_action - env->prev_action[0])
@@ -1106,6 +1212,13 @@ void c_step(LineFollow* env) {
     float signed_turn = clampf(
         (cmd.right_mps - cmd.left_mps) / fmaxf(env->max_wheel_speed_mps, 1e-6f),
         -1.0f, 1.0f);
+    int turn_sign = signed_turn > 0.10f ? 1 : signed_turn < -0.10f ? -1 : 0;
+    if (turn_sign != 0) {
+        if (env->prev_turn_sign != 0 && env->prev_turn_sign != turn_sign) {
+            env->turn_sign_flip_steps += 1;
+        }
+        env->prev_turn_sign = turn_sign;
+    }
     if (fabsf(signed_turn) >= 0.25f) {
         float outer_mps = signed_turn > 0.0f ? cmd.right_mps : cmd.left_mps;
         env->turn_outer_speed_frac_sum += clampf(
@@ -1123,8 +1236,8 @@ void c_step(LineFollow* env) {
 
     float reward = compute_reward(env, progress_delta, env->centerline_error,
         env->heading_error, line_seen, forward_speed, action_delta,
-        centerline_milestone_reward, signed_turn, idle, negative_action_amount,
-        action_bound_violation);
+        centerline_milestone_reward, ambiguous_turn_weight, signed_turn, idle,
+        negative_action_amount, action_bound_violation);
     if (env->turn_speed_penalty_scale > 0.0f
             && fabsf(env->centerline_error) > 0.001f) {
         float correction_need = clampf(
@@ -1160,10 +1273,9 @@ void c_step(LineFollow* env) {
         env->terminal_too_far = too_far ? 1.0f : 0.0f;
         env->terminal_track_complete = track_complete ? 1.0f : 0.0f;
         if (lost_line || too_far) {
-            float previous_reward = env->rewards[0];
             env->rewards[0] = clampf(-fabsf(env->off_track_terminal_penalty), -1.0f, 0.0f);
-            env->episode_return += env->rewards[0] - previous_reward;
             env->last_reward = env->rewards[0];
+            env->episode_return = env->rewards[0];
         } else if (success) {
             float terminal_bonus = env->success_reward * success_quality;
             float final_reward = clampf(env->rewards[0] + terminal_bonus, -1.0f, 1.0f);

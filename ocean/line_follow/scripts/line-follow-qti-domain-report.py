@@ -44,7 +44,7 @@ def read_env_config(path):
         "line_width_jitter_m": f("line_width_jitter_m", 0.006),
         "line_edge_softness_m": f("line_edge_softness_m", 0.006),
         "line_edge_softness_jitter_m": f("line_edge_softness_jitter_m", 0.004),
-        "line_reflectance_noise": f("line_reflectance_noise", 0.12),
+        "line_reflectance_noise": f("line_reflectance_noise", 0.75),
         "start_lateral_offset_m": f("start_lateral_offset_m", 0.025),
     }
 
@@ -96,7 +96,7 @@ def sample_sensor_layout(cfg, rng):
 def sample_sensor_response(cfg, rng, robot_lateral_m):
     width, softness = sample_episode_params(cfg, rng)
     sensor_laterals = sample_sensor_layout(cfg, rng)
-    reflectance_noise = min(max(cfg["line_reflectance_noise"], 0.0), 0.35)
+    reflectance_noise = min(max(cfg["line_reflectance_noise"], 0.0), 0.90)
     black_reflectance = 1.0 - reflectance_noise * rng.random()
     raw = []
     obs = []
@@ -161,7 +161,7 @@ def sample_start_response(cfg, rng):
     width, softness = sample_episode_params(cfg, rng)
     sensor_laterals = sample_sensor_layout(cfg, rng)
     offset = start_sampler_offset(cfg, sensor_laterals, width, rng)
-    reflectance_noise = min(max(cfg["line_reflectance_noise"], 0.0), 0.35)
+    reflectance_noise = min(max(cfg["line_reflectance_noise"], 0.0), 0.90)
     black_reflectance = 1.0 - reflectance_noise * rng.random()
 
     raw = []

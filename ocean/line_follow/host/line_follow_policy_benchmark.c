@@ -94,6 +94,8 @@ static const BenchCase STANDARD_CASES[] = {
     {"s_curve", LINE_FOLLOW_TRACK_S_CURVE, 0.36f, 0.035f, 0.000f, 0.000f, false, 0},
     {"s_curve_mirror", LINE_FOLLOW_TRACK_S_CURVE, 0.36f, 0.035f, 0.000f, 0.000f, true, 0},
     {"oval", LINE_FOLLOW_TRACK_OVAL, 0.09f, 0.055f, 0.000f, 0.000f, false, 0},
+    {"corner_left", LINE_FOLLOW_TRACK_CORNER, 0.085f, 1.45f, 0.000f, 0.000f, false, 0},
+    {"corner_right", LINE_FOLLOW_TRACK_CORNER, 0.085f, 1.45f, 0.000f, 0.000f, true, 0},
 };
 
 static const BenchCase STRESS_CASES[] = {
@@ -109,6 +111,10 @@ static const BenchCase STRESS_CASES[] = {
     {"stress_s_curve_mirror", LINE_FOLLOW_TRACK_S_CURVE, 0.42f, 0.060f, 0.000f, 0.000f, true, 0},
     {"stress_oval", LINE_FOLLOW_TRACK_OVAL, 0.075f, 0.042f, 0.000f, 0.000f, false, 0},
     {"stress_tight_oval", LINE_FOLLOW_TRACK_OVAL, 0.065f, 0.032f, 0.000f, 0.000f, false, 0},
+    {"stress_corner_left", LINE_FOLLOW_TRACK_CORNER, 0.075f, 1.65f, 0.000f, 0.000f, false, 0},
+    {"stress_corner_right", LINE_FOLLOW_TRACK_CORNER, 0.075f, 1.65f, 0.000f, 0.000f, true, 0},
+    {"stress_tight_corner_left", LINE_FOLLOW_TRACK_CORNER, 0.060f, 2.05f, 0.000f, 0.000f, false, 0},
+    {"stress_tight_corner_right", LINE_FOLLOW_TRACK_CORNER, 0.060f, 2.05f, 0.000f, 0.000f, true, 0},
 };
 
 static const BenchCase SEEDED_RANDOM_CASES[] = {
@@ -126,25 +132,9 @@ static const BenchCase SEEDED_RANDOM_CASES[] = {
     {"seeded_random_1012", LINE_FOLLOW_TRACK_RANDOM, 0.0f, 0.0f, -0.010f, 0.150f, false, 1012u},
 };
 
-static int align4_int(int value) {
-    return (value + 3) & ~3;
-}
-
 static int expected_raw_float_count(void) {
-    int index = 0;
-    index += HIDDEN_SIZE * OBS_SIZE;
-    index = align4_int(index);
-    index += (NUM_ACTIONS + 1) * HIDDEN_SIZE;
-    index = align4_int(index);
-    index += NUM_ACTIONS;
-    if (NUM_LAYERS > 0) {
-        index = align4_int(index);
-        for (int layer = 0; layer < NUM_LAYERS; layer++) {
-            index += 3 * HIDDEN_SIZE * HIDDEN_SIZE;
-            index = align4_int(index);
-        }
-    }
-    return index;
+    return puffernet_storage_weight_count(
+        OBS_SIZE, HIDDEN_SIZE, NUM_LAYERS, NUM_ACTIONS);
 }
 
 static void reset_recurrent_state(PufferNet* net) {
@@ -170,6 +160,9 @@ static bool generate_case_track(LineFollow* env, const BenchCase* c) {
         ok = generate_s_curve(&env->track, c->a, c->b, env->episode_line_width_m, env->track_bounds_m);
     } else if (c->family == LINE_FOLLOW_TRACK_OVAL) {
         ok = generate_oval(&env->track, c->a, c->b, env->episode_line_width_m, env->track_bounds_m);
+    } else if (c->family == LINE_FOLLOW_TRACK_CORNER) {
+        ok = generate_corner(&env->track, c->a, c->b, 0.18f, 0.18f,
+            env->episode_line_width_m, env->track_bounds_m);
     }
     if (ok && c->mirror_y) {
         ok = track_mirror_y(&env->track);
@@ -302,6 +295,7 @@ static void print_usage(const char* argv0) {
         "Usage: %s WEIGHTS.bin [--dt SEC] [--dt-min SEC] [--dt-max SEC] "
         "[--motor-lag-alpha A] [--max-wheel-speed-mps MPS] [--command-deadband X] "
         "[--min-drive-ticks-per-sec N] [--max-steps N] "
+        "[--sensor-lateral-center-m M] "
         "[--controller model|straight|heuristic] [--suite standard|stress|seeded_random|all] "
         "[--json PATH] [--training-log PATH]\n",
         argv0);
@@ -412,6 +406,7 @@ static void write_json_summary(const char* path, const char* controller_name,
     fprintf(f, "    \"tire_diameter_m\": %.6f,\n", env->tire_diameter_m);
     fprintf(f, "    \"sensor_forward_m\": %.6f,\n", env->sensor_forward_m);
     fprintf(f, "    \"sensor_side_lateral_m\": %.6f,\n", env->sensor_side_lateral_m);
+    fprintf(f, "    \"sensor_lateral_center_m\": %.6f,\n", env->sensor_lateral_center_m);
     fprintf(f, "    \"sensor_lateral_jitter_m\": %.6f,\n", env->sensor_lateral_jitter_m);
     fprintf(f, "    \"sensor_forward_jitter_m\": %.6f,\n", env->sensor_forward_jitter_m);
     fprintf(f, "    \"line_width_m\": %.6f,\n", env->line_width_m);
@@ -522,6 +517,8 @@ int main(int argc, char** argv) {
     env.rewards = rewards;
     env.terminals = terminals;
     env.rng = 123u;
+    env.policy_hidden_size = HIDDEN_SIZE;
+    env.policy_num_layers = NUM_LAYERS;
 
     bool explicit_timing = false;
     for (int i = 2; i < argc; i++) {
@@ -546,6 +543,8 @@ int main(int argc, char** argv) {
             env.min_drive_ticks_per_sec = strtof(argv[++i], NULL);
         } else if (strcmp(argv[i], "--max-steps") == 0 && i + 1 < argc) {
             env.max_steps = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--sensor-lateral-center-m") == 0 && i + 1 < argc) {
+            env.sensor_lateral_center_m = strtof(argv[++i], NULL);
         } else if (strcmp(argv[i], "--controller") == 0 && i + 1 < argc) {
             const char* value = argv[++i];
             if (strcmp(value, "model") == 0) {
@@ -585,13 +584,15 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        raw_floats = weights->size - 7;
+        raw_floats = weights->raw_size;
         int expected = expected_raw_float_count();
-        if (raw_floats != expected) {
+        int aligned_read = puffernet_aligned_read_weight_count(
+            OBS_SIZE, HIDDEN_SIZE, NUM_LAYERS, NUM_ACTIONS);
+        if (raw_floats != expected && raw_floats != aligned_read) {
             fprintf(stderr,
-                "Checkpoint size mismatch: raw_floats=%d expected=%d hidden_size=%d num_layers=%d\n",
-                raw_floats, expected, HIDDEN_SIZE, NUM_LAYERS);
-            free(weights);
+                "Checkpoint size mismatch: raw_floats=%d expected_native=%d aligned_read=%d hidden_size=%d num_layers=%d\n",
+                raw_floats, expected, aligned_read, HIDDEN_SIZE, NUM_LAYERS);
+            free_weights(weights);
             return 1;
         }
 
@@ -607,12 +608,12 @@ int main(int argc, char** argv) {
 
     const char* controller_name = controller == CONTROLLER_MODEL ? "model"
         : controller == CONTROLLER_HEURISTIC ? "heuristic" : "straight";
-    printf("controller=%s checkpoint_path=%s training_log_path=%s suite=%s floats=%d hidden=%d layers=%d dt=%.3f motor_lag_alpha=%.3f max_wheel_speed_mps=%.3f\n",
+    printf("controller=%s checkpoint_path=%s training_log_path=%s suite=%s floats=%d hidden=%d layers=%d dt=%.3f motor_lag_alpha=%.3f max_wheel_speed_mps=%.3f sensor_lateral_center_m=%.3f\n",
         controller_name, weights_path,
         training_log_path != NULL ? training_log_path : "none",
         suite_name(suite), raw_floats,
         HIDDEN_SIZE, NUM_LAYERS, env.dt, env.motor_lag_alpha,
-        env.max_wheel_speed_mps);
+        env.max_wheel_speed_mps, env.sensor_lateral_center_m);
     printf("case,steps,perf,progress_frac,track_progress_m,effective_progress_m,target_progress_m,center_path_m,path_efficiency,avg_raw_left,avg_raw_right,avg_cmd_left_mps,avg_cmd_right_mps,avg_speed_frac,idle_frac,all_white_frac,visible_frac,lost,timeout,complete,negative,action_bound,success,reward\n");
 
     float total_perf = 0.0f;
@@ -709,6 +710,6 @@ int main(int argc, char** argv) {
     if (net != NULL) {
         free_puffernet(net);
     }
-    free(weights);
+    free_weights(weights);
     return 0;
 }

@@ -26,6 +26,7 @@ void my_init(Env* env, Dict* kwargs) {
     env->motor_lag_alpha = dict_get(kwargs, "motor_lag_alpha")->value;
     env->command_deadband = dict_get(kwargs, "command_deadband")->value;
     env->min_drive_ticks_per_sec = dict_get(kwargs, "min_drive_ticks_per_sec")->value;
+    env->avg_speed_perf_target_mps = dict_get(kwargs, "avg_speed_perf_target_mps")->value;
     env->left_speed_scale = dict_get(kwargs, "left_speed_scale")->value;
     env->right_speed_scale = dict_get(kwargs, "right_speed_scale")->value;
     env->lost_line_limit = dict_get(kwargs, "lost_line_limit")->value;
@@ -45,6 +46,7 @@ void my_init(Env* env, Dict* kwargs) {
     env->action_smoothness_penalty = dict_get(kwargs, "action_smoothness_penalty")->value;
     env->action_bound_penalty_scale = dict_get(kwargs, "action_bound_penalty_scale")->value;
     env->turn_penalty_scale = dict_get(kwargs, "turn_penalty_scale")->value;
+    env->ambiguous_turn_penalty_scale = dict_get(kwargs, "ambiguous_turn_penalty_scale")->value;
     env->steering_correction_scale = dict_get(kwargs, "steering_correction_scale")->value;
     env->turn_speed_penalty_scale = dict_get(kwargs, "turn_speed_penalty_scale")->value;
     env->min_turn_outer_action = dict_get(kwargs, "min_turn_outer_action")->value;
@@ -57,6 +59,7 @@ void my_init(Env* env, Dict* kwargs) {
 
     env->sensor_forward_m = dict_get(kwargs, "sensor_forward_m")->value;
     env->sensor_side_lateral_m = dict_get(kwargs, "sensor_side_lateral_m")->value;
+    env->sensor_lateral_center_m = dict_get(kwargs, "sensor_lateral_center_m")->value;
     env->sensor_lateral_jitter_m = dict_get(kwargs, "sensor_lateral_jitter_m")->value;
     env->sensor_forward_jitter_m = dict_get(kwargs, "sensor_forward_jitter_m")->value;
     env->sensor_noise_std = dict_get(kwargs, "sensor_noise_std")->value;
@@ -66,6 +69,9 @@ void my_init(Env* env, Dict* kwargs) {
     env->qti_white_jitter = dict_get(kwargs, "qti_white_jitter")->value;
     env->qti_black_jitter = dict_get(kwargs, "qti_black_jitter")->value;
     env->qti_timeout = dict_get(kwargs, "qti_timeout")->value;
+    env->obs_raw_diff = dict_get(kwargs, "obs_raw_diff")->value;
+    env->obs_raw_diff_gain = dict_get(kwargs, "obs_raw_diff_gain")->value;
+    env->obs_raw_diff_span = dict_get(kwargs, "obs_raw_diff_span")->value;
 
     env->line_width_m = dict_get(kwargs, "line_width_m")->value;
     env->line_width_jitter_m = dict_get(kwargs, "line_width_jitter_m")->value;
@@ -85,6 +91,7 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "perf", log->perf);
     dict_set(out, "base_perf", log->base_perf);
     dict_set(out, "min_drive_speed_score", log->min_drive_speed_score);
+    dict_set(out, "avg_speed_score", log->avg_speed_score);
     dict_set(out, "score", log->score);
     dict_set(out, "progress_frac", log->progress_frac);
     dict_set(out, "effective_progress_m", log->effective_progress_m);
@@ -100,12 +107,12 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "avg_speed_frac", log->avg_speed_frac);
     dict_set(out, "idle_frac", log->idle_frac);
     dict_set(out, "turn_outer_speed_frac", log->turn_outer_speed_frac);
+    dict_set(out, "turn_sign_flip_frac", log->turn_sign_flip_frac);
     dict_set(out, "qti_no_black_frac", log->qti_no_black_frac);
     dict_set(out, "qti_weak_line_frac", log->qti_weak_line_frac);
     dict_set(out, "qti_pair_weak_frac", log->qti_pair_weak_frac);
     dict_set(out, "negative_action_frac", log->negative_action_frac);
     dict_set(out, "action_bound_violation", log->action_bound_violation);
-    dict_set(out, "raw_action_abs", log->raw_action_abs);
     dict_set(out, "terminal_timeout", log->terminal_timeout);
     dict_set(out, "terminal_lost_line", log->terminal_lost_line);
     dict_set(out, "terminal_too_far", log->terminal_too_far);
