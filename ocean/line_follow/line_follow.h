@@ -164,11 +164,14 @@ struct LineFollow {
     float terminal_success;
 
     float progress_reward_scale;
+    float path_efficiency_perf_weight;
+    float wasted_motion_penalty_scale;
     float centerline_penalty_scale;
     float centerline_reward_interval_m;
     float success_reward;
     float heading_penalty_scale;
     float lost_line_penalty;
+    float lost_line_recovery_scale;
     float off_track_terminal_penalty;
     float action_smoothness_penalty;
     float action_bound_penalty_scale;
@@ -268,11 +271,14 @@ void set_defaults(LineFollow* env) {
     env->right_speed_scale = 1.0f;
 
     env->progress_reward_scale = 1.0f;
+    env->path_efficiency_perf_weight = 0.0f;
+    env->wasted_motion_penalty_scale = 0.0f;
     env->centerline_penalty_scale = 0.0f;
     env->centerline_reward_interval_m = 0.010f;
     env->success_reward = 1.0f;
     env->heading_penalty_scale = 0.0f;
     env->lost_line_penalty = 0.03f;
+    env->lost_line_recovery_scale = 0.0f;
     env->off_track_terminal_penalty = 1.0f;
     env->action_smoothness_penalty = 0.0f;
     env->action_bound_penalty_scale = 0.01f;
@@ -488,9 +494,26 @@ static inline float episode_avg_speed_score(LineFollow* env) {
     return clampf(avg_forward_speed / env->avg_speed_perf_target_mps, 0.0f, 1.0f);
 }
 
+static inline float episode_path_efficiency(LineFollow* env) {
+    if (env->center_path_m <= 1e-6f) {
+        return 0.0f;
+    }
+    return clampf(env->episode_progress / env->center_path_m, 0.0f, 1.0f);
+}
+
+static inline float episode_path_efficiency_score(LineFollow* env) {
+    float weight = clampf(env->path_efficiency_perf_weight, 0.0f, 1.0f);
+    if (weight <= 0.0f) {
+        return 1.0f;
+    }
+    float efficiency = episode_path_efficiency(env);
+    return clampf(1.0f - weight * (1.0f - efficiency), 0.0f, 1.0f);
+}
+
 static inline float episode_perf_score(LineFollow* env) {
     return episode_progress_accuracy_perf_score(env)
-        * episode_avg_speed_score(env);
+        * episode_avg_speed_score(env)
+        * episode_path_efficiency_score(env);
 }
 
 void add_log(LineFollow* env) {
@@ -509,7 +532,9 @@ void add_log(LineFollow* env) {
     float base_perf = episode_progress_accuracy_perf_score(env);
     float min_drive_speed_score = episode_min_drive_speed_score(env);
     float avg_speed_score = episode_avg_speed_score(env);
-    float perf = base_perf * avg_speed_score;
+    float path_efficiency = episode_path_efficiency(env);
+    float path_efficiency_score = episode_path_efficiency_score(env);
+    float perf = base_perf * avg_speed_score * path_efficiency_score;
     float logged_episode_return = env->episode_return;
     if (off_track_failure) {
         progress_frac = 0.0f;
@@ -520,9 +545,6 @@ void add_log(LineFollow* env) {
         logged_episode_return = clampf(
             -fabsf(env->off_track_terminal_penalty), -1.0f, 0.0f);
     }
-    float path_efficiency = env->center_path_m > 1e-6f
-        ? clampf(env->episode_progress / env->center_path_m, 0.0f, 1.0f)
-        : 0.0f;
     float avg_forward_speed = episode_length > 0.0f
         ? env->forward_speed_sum / episode_length
         : 0.0f;
@@ -879,6 +901,23 @@ static inline float ambiguous_observation_turn_weight(LineFollow* env) {
     return line_like_weight * balanced_weight;
 }
 
+static inline float normalized_wasted_motion(LineFollow* env,
+        float center_path_delta, float progress_delta) {
+    float dt = env->episode_dt > 0.0f ? env->episode_dt : env->dt;
+    float max_tick_motion = fmaxf(env->max_wheel_speed_mps * dt, 1e-6f);
+    float useful_progress = fmaxf(progress_delta, 0.0f);
+    float wasted = fmaxf(center_path_delta - useful_progress, 0.0f);
+    return clampf(wasted / max_tick_motion, 0.0f, 1.0f);
+}
+
+static inline float lost_line_recovery_score(LineFollow* env,
+        float previous_centerline_error, float centerline_error) {
+    float scale = fmaxf(env->sensor_side_lateral_m, 1e-6f);
+    float previous_abs_error = fabsf(previous_centerline_error);
+    float current_abs_error = fabsf(centerline_error);
+    return clampf((previous_abs_error - current_abs_error) / scale, -1.0f, 1.0f);
+}
+
 float compute_reward(LineFollow* env, float progress_delta, float centerline_error,
         float heading_error, bool line_seen, float forward_speed, float action_delta,
         float centerline_milestone_reward, float ambiguous_turn_weight,
@@ -1141,6 +1180,7 @@ void c_reset(LineFollow* env) {
 void c_step(LineFollow* env) {
     float raw_left_action = env->actions[0];
     float raw_right_action = env->actions[1];
+    float previous_centerline_error = env->centerline_error;
     float action_bound_violation = fmaxf(fabsf(raw_left_action) - 1.0f, 0.0f)
         + fmaxf(fabsf(raw_right_action) - 1.0f, 0.0f);
     env->action_bound_violation_sum += action_bound_violation;
@@ -1177,7 +1217,8 @@ void c_step(LineFollow* env) {
     env->robot_theta = angle_diff(env->robot_theta, 0.0f);
     float dx = env->robot_x - prev_x;
     float dy = env->robot_y - prev_y;
-    env->center_path_m += sqrtf(dx * dx + dy * dy);
+    float center_path_delta = sqrtf(dx * dx + dy * dy);
+    env->center_path_m += center_path_delta;
 
     env->tick += 1;
     compute_observations(env);
@@ -1233,11 +1274,19 @@ void c_step(LineFollow* env) {
     }
     float centerline_milestone_reward = record_progress_metrics(
         env, progress_delta, env->centerline_error);
+    float wasted_motion_frac = normalized_wasted_motion(
+        env, center_path_delta, progress_delta);
+    float lost_recovery = lost_line_recovery_score(
+        env, previous_centerline_error, env->centerline_error);
 
     float reward = compute_reward(env, progress_delta, env->centerline_error,
         env->heading_error, line_seen, forward_speed, action_delta,
         centerline_milestone_reward, ambiguous_turn_weight, signed_turn, idle,
         negative_action_amount, action_bound_violation);
+    reward -= env->wasted_motion_penalty_scale * wasted_motion_frac;
+    if (!line_seen) {
+        reward += env->lost_line_recovery_scale * lost_recovery;
+    }
     if (env->turn_speed_penalty_scale > 0.0f
             && fabsf(env->centerline_error) > 0.001f) {
         float correction_need = clampf(

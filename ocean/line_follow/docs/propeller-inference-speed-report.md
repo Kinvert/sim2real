@@ -7,6 +7,13 @@ Propeller 1 architecture, and practical ways to reduce policy decision latency.
 This report has been updated to match the current three-sensor implementation
 and measured H8/L0 timing.
 
+Update, 2026-06-02: the current physical baseline is no longer H8/L0. The
+robot path now uses the `h85dqfhx` H4/L1 checkpoint with fixed-point recurrent
+Propeller C inference and PASM QTI sampling. Keep the H8/L0 folding discussion
+as useful historical context, but use `config/line_follow.ini`,
+`docs/h4l1-selected-candidate.md`, and `docs/line-follow-best-runs.md` for the
+current deployable baseline and candidate-selection rules.
+
 ## Executive summary
 
 The best first speedup is not multiple floating-point worker cogs. The current

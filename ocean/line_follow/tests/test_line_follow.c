@@ -182,6 +182,10 @@ static void test_measured_geometry_defaults(void) {
     expect_true(env.policy_num_layers == 0, "default policy timing feed-forward layer count matches config default");
     expect_near(env.progress_reward_scale, 1.0f, 1e-6f,
         "progress reward is normalized to full-speed tick progress");
+    expect_near(env.path_efficiency_perf_weight, 0.0f, 1e-6f,
+        "path-efficiency perf weighting is opt-in from training config");
+    expect_near(env.wasted_motion_penalty_scale, 0.0f, 1e-6f,
+        "wasted-motion penalty is opt-in from training config");
     expect_near(env.centerline_penalty_scale, 0.0f, 1e-6f,
         "separate dense centerline penalty is disabled because progress is accuracy-scaled");
     expect_near(env.centerline_reward_interval_m, 0.010f, 1e-6f,
@@ -192,6 +196,8 @@ static void test_measured_geometry_defaults(void) {
         "separate heading penalty is disabled because checkpoint accuracy handles it indirectly");
     expect_near(env.lost_line_penalty, 0.03f, 1e-6f,
         "lost line penalty preserves shaping without dominating checkpoint accuracy");
+    expect_near(env.lost_line_recovery_scale, 0.0f, 1e-6f,
+        "lost-line recovery shaping is opt-in from training config");
     expect_near(env.off_track_terminal_penalty, 1.0f, 1e-6f,
         "off-track terminal penalty defaults to the largest clipped negative reward");
     expect_near(env.action_bound_penalty_scale, 0.01f, 1e-6f,
@@ -558,6 +564,17 @@ static void test_perf_penalizes_centerline_error(void) {
         "centered straight progress has full path efficiency");
 
     memset(&env.log, 0, sizeof(env.log));
+    env.path_efficiency_perf_weight = 0.4f;
+    env.center_path_m = 2.0f * env.episode_progress;
+    add_log(&env);
+    expect_near(env.log.path_efficiency, 0.5f, 1e-6f,
+        "path efficiency logs raw progress divided by axle-center travel");
+    expect_near(env.log.perf, 0.8f, 1e-6f,
+        "path-efficiency perf weight discounts inefficient paths without hard-coding sensors");
+    env.path_efficiency_perf_weight = 0.0f;
+    env.center_path_m = env.episode_progress;
+
+    memset(&env.log, 0, sizeof(env.log));
     env.min_drive_ticks_per_sec = 20.0f;
     add_log(&env);
     expect_near(env.log.perf, 1.0f, 1e-6f,
@@ -713,6 +730,24 @@ static void test_continuous_progress_and_motion_rewards(void) {
     record_progress_metrics(&env, 0.010f, 2.0f * env.sensor_side_lateral_m);
     expect_near(env.effective_progress_m, before_far, 1e-6f,
         "far-off progress adds no effective progress");
+
+    float max_tick_motion = env.max_wheel_speed_mps * env.dt;
+    expect_near(
+        normalized_wasted_motion(&env, max_tick_motion, max_tick_motion),
+        0.0f, 1e-6f,
+        "motion that becomes track progress is not wasted");
+    expect_near(
+        normalized_wasted_motion(&env, max_tick_motion, 0.25f * max_tick_motion),
+        0.75f, 1e-6f,
+        "path motion without matching progress is normalized as wasted motion");
+    expect_near(
+        lost_line_recovery_score(&env, 0.030f, 0.012f),
+        1.0f, 1e-6f,
+        "lost-line recovery score rewards shrinking centerline error");
+    expect_near(
+        lost_line_recovery_score(&env, 0.012f, 0.030f),
+        -1.0f, 1e-6f,
+        "lost-line recovery score penalizes moving farther from the centerline");
 
     float stopped = compute_reward(&env, 0.0f, 0.0f, 0.0f, true, 0.0f,
         0.0f, 0.0f, 0.0f, 0.0f, true, 0.0f, 0.0f);

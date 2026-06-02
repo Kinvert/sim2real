@@ -14,6 +14,76 @@ The env itself must follow normal PufferLib Ocean conventions: C env code,
 simple readable files, high steps per second, local raylib render support, and no
 large external physics dependency.
 
+## Current State, 2026-06-02
+
+Treat this section and the files it points to as the handoff source of truth.
+This spec still contains historical context from earlier H8/L0 and H3/L1 phases.
+
+Current physical baseline:
+
+```text
+run_id: h85dqfhx
+project: sim3
+checkpoint: checkpoints/line_follow/h85dqfhx/0000000084148224.bin
+policy: hidden_size=4, num_layers=1
+deployment: fixed-point recurrent Propeller C with PASM QTI sampling
+pins: [left, middle, right] = [P7, P6, P5]
+status: good enough for current demo/video work, not final delivery quality
+```
+
+The user reported `h85dqfhx` as the best physical run so far: responsive,
+roughly 80% there, and much better on tight turns than the earlier policies, but
+it can still leave the track and shows slight strategic wobble when the line is
+between sensors. The latest successful EEPROM image for that baseline is:
+
+```text
+ocean/line_follow/build/line-follow/line_follow_model_live_drive_p765_h4l1_h85dqfhx_video_30000ms_start2000ms_statusleds.elf
+```
+
+Current checked-in training/deploy defaults in `config/line_follow.ini` are:
+
+```text
+hidden_size = 4
+num_layers = 1
+dt = 0.0165
+dt_min = 0.015
+dt_max = 0.020
+max_wheel_speed_mps = 0.2888961521163583
+command_deadband = 0.06867213468067349
+min_drive_ticks_per_sec = 5
+qti_white_time = 80
+qti_black_time = 403
+qti_threshold = 0.17455456797033547
+sensor_forward_m = 0.0435
+sensor_side_lateral_m = 0.018
+```
+
+Current reward/sweep behavior keeps the basic progress-times-accuracy scoring
+idea, adds average-speed and path-efficiency scaling to `perf`, adds a small
+wasted-motion penalty, and adds privileged lost-line recovery shaping. Do not
+hard-code sensor-state steering rules in firmware or the env; this is still an
+RL experiment and the policy must learn the behavior.
+
+For physical candidate selection, do not pick from sim `perf` alone. First run
+the fixed-point recurrent replay screen on repeated observations such as
+`all_white`, `weak_center`, `balanced_weak`, `left_black`, and `right_black`.
+The `sim4` top-perf run `4mcnhp5u` failed physically because its weak/all-white
+recovery sign was opposite the known-good baseline. `bxycoua5` and `0asku73p`
+were physically viable because their replay signs were compatible with
+`h85dqfhx`.
+
+Read these docs before changing the robot path:
+
+```text
+ocean/line_follow/docs/h4l1-selected-candidate.md
+ocean/line_follow/docs/line-follow-best-runs.md
+ocean/line_follow/docs/propeller-inference-speed-report.md
+```
+
+Keep commits selective. Several old untracked diagnostic files may exist in a
+working tree after robot sessions; do not add them unless they are deliberately
+being promoted into the maintained workflow.
+
 ## Keith Notes
 
 I will add notes as I find them. Once you write them up better and put them in the right place you can get rid of the comment I made. Don't delete this section, just update what is needed in other md's etc, and then you can delete that single bullet point here in Keith Notes.

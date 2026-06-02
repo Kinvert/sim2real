@@ -37,11 +37,14 @@ void my_init(Env* env, Dict* kwargs) {
     env->model_dt_enabled = dict_get(kwargs, "model_dt_enabled")->value;
 
     env->progress_reward_scale = dict_get(kwargs, "progress_reward_scale")->value;
+    env->path_efficiency_perf_weight = dict_get(kwargs, "path_efficiency_perf_weight")->value;
+    env->wasted_motion_penalty_scale = dict_get(kwargs, "wasted_motion_penalty_scale")->value;
     env->centerline_penalty_scale = dict_get(kwargs, "centerline_penalty_scale")->value;
     env->centerline_reward_interval_m = dict_get(kwargs, "centerline_reward_interval_m")->value;
     env->success_reward = dict_get(kwargs, "success_reward")->value;
     env->heading_penalty_scale = dict_get(kwargs, "heading_penalty_scale")->value;
     env->lost_line_penalty = dict_get(kwargs, "lost_line_penalty")->value;
+    env->lost_line_recovery_scale = dict_get(kwargs, "lost_line_recovery_scale")->value;
     env->off_track_terminal_penalty = dict_get(kwargs, "off_track_terminal_penalty")->value;
     env->action_smoothness_penalty = dict_get(kwargs, "action_smoothness_penalty")->value;
     env->action_bound_penalty_scale = dict_get(kwargs, "action_bound_penalty_scale")->value;
