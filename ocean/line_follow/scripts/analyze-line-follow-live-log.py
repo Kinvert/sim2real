@@ -82,9 +82,93 @@ def summarize_scalar(rows, key, label):
         )
 
 
+def add_turn_derived(rows):
+    elapsed_ms = 0.0
+    first_timestamp = rows[0].get("timestamp") if rows else None
+    for idx, row in enumerate(rows):
+        row["turn_delta_ticks"] = row["ticks"][1] - row["ticks"][0]
+        if row["turn_delta_ticks"] > 2:
+            row["turn_sign"] = 1
+        elif row["turn_delta_ticks"] < -2:
+            row["turn_sign"] = -1
+        else:
+            row["turn_sign"] = 0
+
+        if first_timestamp is not None and "timestamp" in row:
+            row["time_ms"] = 1000.0 * (row["timestamp"] - first_timestamp)
+        else:
+            if idx > 0:
+                if row.get("period_us", 0) > 0:
+                    elapsed_ms += row["period_us"] / 1000.0
+                elif row.get("dt_ms", 0) > 0:
+                    elapsed_ms += row["dt_ms"]
+            row["time_ms"] = elapsed_ms
+
+
+def range_text(values):
+    if not values:
+        return "n/a"
+    return f"{min(values)}..{max(values)}"
+
+
+def turn_oscillation_stats(rows):
+    turn_rows = [r for r in rows if r.get("turn_sign", 0) != 0]
+    flips = []
+    if not turn_rows:
+        return flips
+
+    prev = turn_rows[0]
+    for row in turn_rows[1:]:
+        if row["turn_sign"] != prev["turn_sign"]:
+            dt = row["time_ms"] - prev["time_ms"]
+            if dt > 0.0:
+                flips.append(dt)
+            prev = row
+        elif row["turn_sign"] != 0:
+            prev = row
+    return flips
+
+
+def print_turn_summary(label, rows):
+    if not rows:
+        print(f"{label}: rows=0")
+        return
+
+    deltas = [r["turn_delta_ticks"] for r in rows]
+    right_faster = [r for r in rows if r["turn_sign"] > 0]
+    left_faster = [r for r in rows if r["turn_sign"] < 0]
+    balanced = [r for r in rows if r["turn_sign"] == 0]
+    flips = turn_oscillation_stats(rows)
+    duration_s = 0.0
+    if len(rows) > 1:
+        duration_s = max(0.0, (rows[-1]["time_ms"] - rows[0]["time_ms"]) / 1000.0)
+    flip_rate = len(flips) / duration_s if duration_s > 0.0 else 0.0
+
+    half_period_text = "n/a"
+    full_period_text = "n/a"
+    if flips:
+        half_period = statistics.mean(flips)
+        half_period_text = (
+            f"avg={half_period:.1f} p50={percentile(flips, 50):.1f} "
+            f"range={range_text([round(v, 1) for v in flips])}"
+        )
+        full_period_text = f"{2.0 * half_period:.1f}"
+
+    print(
+        f"{label}:",
+        f"rows={len(rows)} mean_delta_right_minus_left={statistics.mean(deltas):.2f} "
+        f"range={range_text(deltas)} "
+        f"right_faster={len(right_faster)} "
+        f"left_faster={len(left_faster)} balanced={len(balanced)} "
+        f"sign_flips={len(flips)} flip_rate_hz={flip_rate:.2f} "
+        f"half_period_ms={half_period_text} full_period_ms_est={full_period_text}",
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("log")
+    parser.add_argument("--threshold-q1000", type=int, default=150)
     args = parser.parse_args()
 
     rows = []
@@ -96,6 +180,7 @@ def main():
 
     if not rows:
         raise SystemExit("No live telemetry rows found")
+    add_turn_derived(rows)
 
     labels = ["left", "middle", "right"] if len(rows[0]["raw"]) == 3 else [
         "outer_left", "inner_left", "inner_right", "outer_right"]
@@ -160,6 +245,22 @@ def main():
             f"ticks_max={ticks_max:4d} ticks_mean={ticks_mean:7.1f} "
             f"clipped_action_rows={clipped}"
         )
+    print_turn_summary("turn_bias", rows)
+    if len(rows[0]["obs"]) >= 3:
+        middle_right_rows = [
+            row for row in rows
+            if row["obs"][1] >= args.threshold_q1000
+            and row["obs"][2] >= args.threshold_q1000
+        ]
+        middle_left_rows = [
+            row for row in rows
+            if row["obs"][1] >= args.threshold_q1000
+            and row["obs"][0] >= args.threshold_q1000
+        ]
+        if middle_right_rows:
+            print_turn_summary("middle_right_turn_bias", middle_right_rows)
+        if middle_left_rows:
+            print_turn_summary("middle_left_turn_bias", middle_left_rows)
     model_rows = [row for row in rows if "model_obs" in row]
     if model_rows:
         print("model observations used by policy:")

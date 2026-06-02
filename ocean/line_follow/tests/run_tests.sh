@@ -29,3 +29,8 @@ cc=${CC:-clang}
   -o ocean/line_follow/build/tests/test_line_follow
 
 ocean/line_follow/build/tests/test_line_follow
+
+"${PYTHON:-python3}" ocean/line_follow/tests/test_analyze_sd_log.py
+"${PYTHON:-python3}" ocean/line_follow/tests/test_replay_live_log.py
+"${PYTHON:-python3}" ocean/line_follow/tests/test_analyze_candidate_compare.py
+"${PYTHON:-python3}" ocean/line_follow/tests/test_model_weight_layout.py
