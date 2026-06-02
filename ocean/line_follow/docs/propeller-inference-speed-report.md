@@ -142,12 +142,53 @@ H8/L0 feed-forward path, telemetry-only:
 H8/L0 feed-forward path, drive log:
   ocean/line_follow/build/line-follow/model-live-ff8-drive.txt
   host_loop_ms p50 = 64.6 ms
+
+H3/L1 fixed-point recurrent path, PASM QTI, telemetry-only:
+  ocean/line_follow/build/line-follow/model-live-h3l1-fixed-nodrive-telemetry-20260531-171558.txt
+  host_loop_ms p50 = 11.3 ms
+  loop_dt_ms p50 = 11.0 ms
+  policy_us p50 = 10585
+
+H3/L1 fixed-point recurrent path, PASM QTI, drive call linked, zero wheel speed:
+  ocean/line_follow/build/line-follow/model-live-h3l1-fixed-drivecall-zero-telemetry-20260531-171732.txt
+  host_loop_ms p50 = 11.4 ms
+  period_us p50 = 11138
+  body_us p50 = 10993
+  policy_us p50 = 10486
+  drive_us p50 = 222
+
+H4/L1 fixed-point recurrent path, PASM QTI, telemetry-only:
+  ocean/line_follow/build/line-follow/model-live-h4l1-1780281463244-timing.txt
+  host_loop_ms p50 = 16.0 ms
+  period_us p50 = 15048
+  body_us p50 = 14890
+  policy_us p50 = 14598
 ```
 
 Those H8/L0 measurements used `loop_ms=25` and `print_every=50`, so the measured
 period includes a fixed 25 ms sleep plus occasional serial output. The useful
 work is therefore materially less than 52 ms, but still too slow to leave as-is
 if the robot is overrunning the line.
+
+The H3/L1 fixed-point measurements use checkpoint
+`checkpoints/line_follow/1780269570510/0000000099876864.bin`,
+`inference_mode=2`, `folded_supported=0`, `LINE_FOLLOW_LOOP_MS=0`, PASM QTI,
+and sparse telemetry (`print_every=80`). The zero-speed drive-call build clamps
+both wheel commands to zero by compiling `MAX_WHEEL_SPEED_MPS=0` and
+`MIN_DRIVE_TICKS_PER_SEC=0`, so it measures the `abdrive` call cost without a
+moving robot. The selected physical-drive EEPROM image was written separately
+with normal `max_wheel_speed_mps=0.260`, `min_drive_ticks_per_sec=20`, and a
+30-second run cap:
+
+```text
+ocean/line_follow/build/line-follow/line_follow_model_live_drive_p765_h3l1_selected_deploy30s.elf
+ocean/line_follow/build/line-follow/eeprom-load-p765-h3l1-selected-fixed-deploy30s-norun.txt
+```
+
+The current H4/L1 training config is centered on the measured deployed loop:
+`dt=0.0165`, `dt_min=0.015`, and `dt_max=0.020`. That is deliberately close to
+the measured firmware period while still randomizing enough to avoid training a
+policy that only works at a single exact control cadence.
 
 ## Propeller architecture constraints
 
@@ -403,7 +444,9 @@ every loop waited 25 ms after the work was already finished. Current line-follow
 firmware defaults to `firmware_loop_ms=0`; the old H8/L0 three-sensor float
 loop was about 24 ms with sparse telemetry. The folded fixed-point H8/L0 live
 drive loop measured about 6.4 ms p50 and 7.3 ms p95 with motors enabled, no SD
-logging, and sparse host-timestamp telemetry.
+logging, and sparse host-timestamp telemetry. The current H4/L1 fixed-point
+recurrent path is about 16 ms p50 with PASM QTI and sparse telemetry, so a small
+recurrent layer is no longer automatically too slow for the robot loop.
 
 Better control-loop behavior:
 
