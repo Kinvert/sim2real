@@ -18,24 +18,54 @@ def c_float(value):
     return text + "f"
 
 
-def align4(index):
-    return (index + 3) & ~3
+def align8(index):
+    return (index + 7) & ~7
 
 
-def expected_raw_float_count(obs_size, hidden_size, num_layers, num_actions):
+def compact_float_count(obs_size, hidden_size, num_layers, num_actions):
+    decoder_size = num_actions + 1
+    return (
+        hidden_size * obs_size
+        + decoder_size * hidden_size
+        + num_actions
+        + num_layers * 3 * hidden_size * hidden_size
+    )
+
+
+def storage_float_count(obs_size, hidden_size, num_layers, num_actions):
     decoder_size = num_actions + 1
     index = 0
+    index = align8(index)
     index += hidden_size * obs_size
-    index = align4(index)
+    index = align8(index)
     index += decoder_size * hidden_size
-    index = align4(index)
+    index = align8(index)
     index += num_actions
-    if num_layers > 0:
-        index = align4(index)
-        for _ in range(num_layers):
-            index += 3 * hidden_size * hidden_size
-            index = align4(index)
+    for _ in range(num_layers):
+        index = align8(index)
+        index += 3 * hidden_size * hidden_size
     return index
+
+
+def aligned_read_float_count(obs_size, hidden_size, num_layers, num_actions):
+    return align8(
+        storage_float_count(obs_size, hidden_size, num_layers, num_actions)
+    )
+
+
+def checkpoint_to_aligned(values, obs_size, hidden_size, num_layers, num_actions):
+    storage_count = storage_float_count(
+        obs_size, hidden_size, num_layers, num_actions
+    )
+    aligned_count = aligned_read_float_count(
+        obs_size, hidden_size, num_layers, num_actions
+    )
+    if len(values) not in (storage_count, aligned_count):
+        raise SystemExit(
+            f"checkpoint has {len(values)} floats; expected native storage "
+            f"{storage_count} or aligned read {aligned_count}"
+        )
+    return values + [0.0] * (aligned_count - len(values))
 
 
 def take_aligned(values, index, count):
@@ -44,7 +74,7 @@ def take_aligned(values, index, count):
         raise SystemExit(
             f"checkpoint ended while reading {count} floats at aligned index {index}"
         )
-    return values[index:end], align4(end)
+    return values[index:end], align8(end)
 
 
 def fold_action_weights(floats, obs_size, hidden_size, num_layers, num_actions):
@@ -92,20 +122,42 @@ def main():
         raise SystemExit(f"{args.checkpoint}: size is not a multiple of 4 bytes")
 
     floats = list(struct.unpack("<" + "f" * (len(data) // 4), data))
-    padded = floats + [0.0] * 7
     checkpoint = os.path.abspath(args.checkpoint)
-    expected = expected_raw_float_count(
+    expected = storage_float_count(
         args.obs_size, args.hidden_size, args.num_layers, args.num_actions
     )
-    folded = None
-    if len(floats) == expected:
-        folded = fold_action_weights(
-            padded,
-            args.obs_size,
-            args.hidden_size,
-            args.num_layers,
-            args.num_actions,
+    aligned_read = aligned_read_float_count(
+        args.obs_size, args.hidden_size, args.num_layers, args.num_actions
+    )
+    compact = compact_float_count(
+        args.obs_size, args.hidden_size, args.num_layers, args.num_actions
+    )
+    if len(floats) not in (expected, aligned_read):
+        raise SystemExit(
+            f"{args.checkpoint}: raw_floats={len(floats)} expected_native={expected} "
+            f"aligned_read={aligned_read} compact={compact} "
+            f"hidden_size={args.hidden_size} num_layers={args.num_layers}. "
+            "Retrain/export this architecture with padded native checkpoint support."
         )
+
+    # Native PufferLib checkpoints store the aligned parameter buffer prefix.
+    # Add only the harmless final tail zeros that get_weights_aligned may touch.
+    padded = checkpoint_to_aligned(
+        floats,
+        args.obs_size,
+        args.hidden_size,
+        args.num_layers,
+        args.num_actions,
+    )
+    padded_q = [round(value * args.fixed_scale) for value in padded]
+    folded = None
+    folded = fold_action_weights(
+        padded,
+        args.obs_size,
+        args.hidden_size,
+        args.num_layers,
+        args.num_actions,
+    )
     folded_q = []
     if folded is not None:
         folded_q = [round(value * args.fixed_scale) for value in folded]
@@ -122,6 +174,7 @@ def main():
         f.write(f"#define LINE_FOLLOW_MODEL_NUM_LAYERS {args.num_layers}\n")
         f.write(f"#define LINE_FOLLOW_MODEL_NUM_ACTIONS {args.num_actions}\n")
         f.write(f"#define LINE_FOLLOW_MODEL_EXPECTED_RAW_FLOATS {expected}\n")
+        f.write(f"#define LINE_FOLLOW_MODEL_ALIGNED_READ_FLOATS {aligned_read}\n")
         f.write(f"#define LINE_FOLLOW_MODEL_FIXED_SCALE {args.fixed_scale}\n")
         f.write(
             f"#define LINE_FOLLOW_MODEL_FOLDED_SUPPORTED "
@@ -142,6 +195,18 @@ def main():
             if i % 4 == 3:
                 f.write("\n")
         if len(padded) % 4 != 0:
+            f.write("\n")
+        f.write("};\n\n")
+        f.write("static const int line_follow_model_weights_q[LINE_FOLLOW_MODEL_PADDED_FLOATS] = {\n")
+        for i, value in enumerate(c_int_list(padded_q)):
+            if i % 4 == 0:
+                f.write("  ")
+            f.write(value)
+            if i != len(padded_q) - 1:
+                f.write(", ")
+            if i % 4 == 3:
+                f.write("\n")
+        if len(padded_q) % 4 != 0:
             f.write("\n")
         f.write("};\n\n")
         if folded is not None:

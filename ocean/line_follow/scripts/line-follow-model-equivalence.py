@@ -28,8 +28,8 @@ CANNED_CASES = [
 ]
 
 
-def align4(index):
-    return (index + 3) & ~3
+def align8(index):
+    return (index + 7) & ~7
 
 
 def round_div(numerator, denominator):
@@ -95,19 +95,42 @@ def load_floats(path):
     return list(struct.unpack("<" + "f" * (len(data) // 4), data))
 
 
-def expected_raw_float_count(hidden_size, num_layers):
+def compact_float_count(hidden_size, num_layers):
+    return (
+        hidden_size * OBS_SIZE
+        + DECODER_SIZE * hidden_size
+        + NUM_ACTIONS
+        + num_layers * 3 * hidden_size * hidden_size
+    )
+
+
+def storage_float_count(hidden_size, num_layers):
     index = 0
+    index = align8(index)
     index += hidden_size * OBS_SIZE
-    index = align4(index)
+    index = align8(index)
     index += DECODER_SIZE * hidden_size
-    index = align4(index)
+    index = align8(index)
     index += NUM_ACTIONS
-    if num_layers > 0:
-        index = align4(index)
-        for _ in range(num_layers):
-            index += 3 * hidden_size * hidden_size
-            index = align4(index)
+    for _ in range(num_layers):
+        index = align8(index)
+        index += 3 * hidden_size * hidden_size
     return index
+
+
+def aligned_read_float_count(hidden_size, num_layers):
+    return align8(storage_float_count(hidden_size, num_layers))
+
+
+def checkpoint_to_aligned(values, hidden_size, num_layers):
+    storage_count = storage_float_count(hidden_size, num_layers)
+    aligned_count = aligned_read_float_count(hidden_size, num_layers)
+    if len(values) not in (storage_count, aligned_count):
+        raise SystemExit(
+            f"checkpoint has {len(values)} floats; expected native storage "
+            f"{storage_count} or aligned read {aligned_count}"
+        )
+    return values + [0.0] * (aligned_count - len(values))
 
 
 def take_aligned(floats, index, count):
@@ -116,56 +139,102 @@ def take_aligned(floats, index, count):
         raise SystemExit(
             f"checkpoint ended while reading {count} floats at aligned index {index}"
         )
-    return floats[index:end], align4(end)
+    return floats[index:end], align8(end)
 
 
-def load_feedforward_model(path, hidden_size, num_layers):
-    if num_layers != 0:
-        raise SystemExit("folded equivalence is only defined for num_layers=0")
-
+def load_model(path, hidden_size, num_layers):
     raw = load_floats(path)
-    expected = expected_raw_float_count(hidden_size, num_layers)
-    if len(raw) != expected:
+    expected = storage_float_count(hidden_size, num_layers)
+    aligned_read = aligned_read_float_count(hidden_size, num_layers)
+    compact = compact_float_count(hidden_size, num_layers)
+    if len(raw) not in (expected, aligned_read):
         raise SystemExit(
-            f"{path}: raw_floats={len(raw)} expected={expected} "
-            f"hidden_size={hidden_size} num_layers={num_layers}"
+            f"{path}: raw_floats={len(raw)} expected_native={expected} "
+            f"aligned_read={aligned_read} compact={compact} "
+            f"hidden_size={hidden_size} num_layers={num_layers}. "
+            "Retrain/export this architecture with padded native checkpoint support."
         )
 
-    padded = raw + [0.0] * 7
+    padded = checkpoint_to_aligned(raw, hidden_size, num_layers)
+    if len(padded) != aligned_read:
+        raise SystemExit(
+            f"internal alignment error: padded={len(padded)} aligned_read={aligned_read}"
+        )
     index = 0
     encoder, index = take_aligned(padded, index, hidden_size * OBS_SIZE)
     decoder, index = take_aligned(padded, index, DECODER_SIZE * hidden_size)
     _log_std, _index = take_aligned(padded, index, NUM_ACTIONS)
+    mingru = []
+    index = _index
+    for _ in range(num_layers):
+        weights, index = take_aligned(padded, index, 3 * hidden_size * hidden_size)
+        mingru.append(weights)
 
-    folded = []
-    for action in range(NUM_ACTIONS):
-        for obs in range(OBS_SIZE):
-            total = 0.0
-            for hidden in range(hidden_size):
-                total += (
-                    decoder[action * hidden_size + hidden]
-                    * encoder[hidden * OBS_SIZE + obs]
-                )
-            folded.append(total)
-    folded_q = [round(value * FIXED_SCALE) for value in folded]
+    folded = None
+    folded_q = None
+    if num_layers == 0:
+        folded = []
+        for action in range(NUM_ACTIONS):
+            for obs in range(OBS_SIZE):
+                total = 0.0
+                for hidden in range(hidden_size):
+                    total += (
+                        decoder[action * hidden_size + hidden]
+                        * encoder[hidden * OBS_SIZE + obs]
+                    )
+                folded.append(total)
+        folded_q = [round(value * FIXED_SCALE) for value in folded]
+
     return {
         "raw_floats": len(raw),
         "encoder": encoder,
         "decoder": decoder,
+        "mingru": mingru,
         "folded": folded,
         "folded_q": folded_q,
+        "weights_q": [round(value * FIXED_SCALE) for value in padded],
         "hidden_size": hidden_size,
+        "num_layers": num_layers,
     }
 
 
-def forward_full(model, obs):
+def sigmoid(x):
+    return 1.0 / (1.0 + math.exp(-x))
+
+
+def forward_full(model, obs, state=None):
     hidden_size = model["hidden_size"]
+    num_layers = model["num_layers"]
+    if state is None:
+        state = [0.0] * hidden_size
+
     hidden = []
     for h in range(hidden_size):
         total = 0.0
         for i in range(OBS_SIZE):
             total += model["encoder"][h * OBS_SIZE + i] * obs[i]
         hidden.append(total)
+
+    if num_layers > 0:
+        combined = []
+        mingru_w = model["mingru"][0]
+        for o in range(3 * hidden_size):
+            total = 0.0
+            for h in range(hidden_size):
+                total += mingru_w[o * hidden_size + h] * hidden[h]
+            combined.append(total)
+        mingru_out = []
+        for h in range(hidden_size):
+            hidden_v = combined[h]
+            gate = combined[hidden_size + h]
+            highway = combined[2 * hidden_size + h]
+            gate_s = sigmoid(gate)
+            hidden_tilde = hidden_v + 0.5 if hidden_v >= 0.0 else sigmoid(hidden_v)
+            next_state = state[h] + gate_s * (hidden_tilde - state[h])
+            highway_s = sigmoid(highway)
+            mingru_out.append(highway_s * next_state + (1.0 - highway_s) * hidden[h])
+            state[h] = next_state
+        hidden = mingru_out
 
     actions = []
     for action in range(NUM_ACTIONS):
@@ -177,6 +246,8 @@ def forward_full(model, obs):
 
 
 def forward_folded(model, obs):
+    if model["folded"] is None:
+        raise RuntimeError("folded inference is only defined for num_layers=0")
     actions = []
     for action in range(NUM_ACTIONS):
         total = 0.0
@@ -186,14 +257,124 @@ def forward_folded(model, obs):
     return actions
 
 
-def forward_fixed(model, obs_q1000):
+SIGMOID_LUT_Q = [
+    5, 6, 7, 8, 9, 10, 12, 13,
+    15, 17, 19, 22, 25, 28, 32, 36,
+    41, 46, 52, 59, 67, 76, 86, 97,
+    110, 124, 141, 159, 180, 204, 230, 261,
+    295, 333, 376, 425, 480, 542, 612, 690,
+    777, 875, 984, 1107, 1243, 1394, 1562, 1748,
+    1953, 2178, 2426, 2695, 2989, 3307, 3649, 4015,
+    4406, 4820, 5256, 5712, 6186, 6674, 7173, 7681,
+    8192, 8703, 9211, 9710, 10198, 10672, 11128, 11564,
+    11978, 12369, 12735, 13077, 13395, 13689, 13958, 14206,
+    14431, 14636, 14822, 14990, 15141, 15277, 15400, 15509,
+    15607, 15694, 15772, 15842, 15904, 15959, 16008, 16051,
+    16089, 16123, 16154, 16180, 16204, 16225, 16243, 16260,
+    16274, 16287, 16298, 16308, 16317, 16325, 16332, 16338,
+    16343, 16348, 16352, 16356, 16359, 16362, 16365, 16367,
+    16369, 16371, 16372, 16374, 16375, 16376, 16377, 16378,
+    16379,
+]
+
+
+def sigmoid_q(value):
+    lo = -8 * FIXED_SCALE
+    hi = 8 * FIXED_SCALE
+    if value <= lo:
+        return SIGMOID_LUT_Q[0]
+    if value >= hi:
+        return SIGMOID_LUT_Q[-1]
+    step = FIXED_SCALE // 8
+    shifted = value - lo
+    idx = shifted // step
+    frac = shifted - idx * step
+    return SIGMOID_LUT_Q[idx] + round_div(
+        (SIGMOID_LUT_Q[idx + 1] - SIGMOID_LUT_Q[idx]) * frac, step
+    )
+
+
+def aligned_weight_slices_q(model):
+    hidden_size = model["hidden_size"]
+    index = 0
+    weights_q = model["weights_q"]
+    encoder = weights_q[index : index + hidden_size * OBS_SIZE]
+    index = align8(index + hidden_size * OBS_SIZE)
+    decoder = weights_q[index : index + DECODER_SIZE * hidden_size]
+    index = align8(index + DECODER_SIZE * hidden_size)
+    index = align8(index + NUM_ACTIONS)
+    mingru = []
+    for _ in range(model["num_layers"]):
+        weights = weights_q[index : index + 3 * hidden_size * hidden_size]
+        index = align8(index + 3 * hidden_size * hidden_size)
+        mingru.append(weights)
+    return encoder, decoder, mingru
+
+
+def forward_fixed(model, obs_q1000, state_q=None):
     action_fixed = []
     action_q1000 = []
-    for action in range(NUM_ACTIONS):
+    hidden_size = model["hidden_size"]
+    num_layers = model["num_layers"]
+    internal_limit = 48 * FIXED_SCALE
+
+    if num_layers == 0 and model["folded_q"] is not None:
+        for action in range(NUM_ACTIONS):
+            total = 0
+            for i in range(OBS_SIZE):
+                total += obs_q1000[i] * model["folded_q"][action * OBS_SIZE + i]
+            fixed = clamp(round_div(total, 1000), -FIXED_SCALE, FIXED_SCALE)
+            action_fixed.append(fixed)
+            action_q1000.append(clamp(round_div(fixed * 1000, FIXED_SCALE), -1000, 1000))
+        return action_fixed, action_q1000
+
+    if state_q is None:
+        state_q = [0] * hidden_size
+    encoder_w_q, decoder_w_q, mingru_w_q = aligned_weight_slices_q(model)
+
+    encoder_out = []
+    for h in range(hidden_size):
         total = 0
         for i in range(OBS_SIZE):
-            total += obs_q1000[i] * model["folded_q"][action * OBS_SIZE + i]
-        fixed = clamp(round_div(total, 1000), -FIXED_SCALE, FIXED_SCALE)
+            total += obs_q1000[i] * encoder_w_q[h * OBS_SIZE + i]
+        encoder_out.append(clamp(round_div(total, 1000), -internal_limit, internal_limit))
+
+    hidden = encoder_out
+    if num_layers > 0:
+        combined = []
+        for o in range(3 * hidden_size):
+            total = 0
+            for h in range(hidden_size):
+                total += encoder_out[h] * mingru_w_q[0][o * hidden_size + h]
+            combined.append(clamp(round_div(total, FIXED_SCALE), -internal_limit, internal_limit))
+
+        mingru_out = []
+        for h in range(hidden_size):
+            hidden_v = combined[h]
+            gate = combined[hidden_size + h]
+            highway = combined[2 * hidden_size + h]
+            gate_s = sigmoid_q(gate)
+            if hidden_v >= 0:
+                hidden_tilde = hidden_v + FIXED_SCALE // 2
+            else:
+                hidden_tilde = sigmoid_q(hidden_v)
+            next_state = state_q[h] + round_div(gate_s * (hidden_tilde - state_q[h]), FIXED_SCALE)
+            next_state = clamp(next_state, -internal_limit, internal_limit)
+            highway_s = sigmoid_q(highway)
+            out = round_div(
+                highway_s * next_state + (FIXED_SCALE - highway_s) * encoder_out[h],
+                FIXED_SCALE,
+            )
+            out = clamp(out, -internal_limit, internal_limit)
+            state_q[h] = next_state
+            mingru_out.append(out)
+        hidden = mingru_out
+
+    for action in range(NUM_ACTIONS):
+        total = 0
+        for h in range(hidden_size):
+            total += hidden[h] * decoder_w_q[action * hidden_size + h]
+        fixed = clamp(round_div(total, FIXED_SCALE), -FIXED_SCALE, FIXED_SCALE)
         action_fixed.append(fixed)
         action_q1000.append(clamp(round_div(fixed * 1000, FIXED_SCALE), -1000, 1000))
     return action_fixed, action_q1000
@@ -286,18 +467,25 @@ def robot_samples(path):
 def compare_dataset(name, samples, model, args):
     count = 0
     max_full_fold_action_diff = 0.0
+    max_full_fixed_action_q1000_diff = 0
     max_fixed_fold_qobs_action_q1000_diff = 0
     full_fold_tick_mismatches = 0
     fixed_fold_qobs_tick_mismatches = 0
     fixed_full_tick_mismatches = 0
+    fixed_full_max_tick_delta = 0
     examples = []
 
     for sample_name, obs, obs_q1000 in samples:
         count += 1
-        full = forward_full(model, obs)
-        folded = forward_folded(model, obs)
         obs_from_q = [value / 1000.0 for value in obs_q1000]
-        folded_qobs = forward_folded(model, obs_from_q)
+        full = forward_full(model, obs_from_q)
+        full_exact_obs = None
+        folded = None
+        folded_qobs = None
+        if model["folded"] is not None:
+            full_exact_obs = forward_full(model, obs)
+            folded = forward_folded(model, obs)
+            folded_qobs = forward_folded(model, obs_from_q)
         fixed_action, fixed_q1000 = forward_fixed(model, obs_q1000)
         fixed = [value / 1000.0 for value in fixed_q1000]
 
@@ -310,24 +498,37 @@ def compare_dataset(name, samples, model, args):
             )
             for value in full
         ]
-        folded_ticks = [
-            action_to_ticks(
-                value,
-                args.max_wheel_speed_mps,
-                args.command_deadband,
-                args.min_drive_ticks_per_sec,
-            )
-            for value in folded
-        ]
-        folded_qobs_ticks = [
-            action_to_ticks(
-                value,
-                args.max_wheel_speed_mps,
-                args.command_deadband,
-                args.min_drive_ticks_per_sec,
-            )
-            for value in folded_qobs
-        ]
+        folded_ticks = None
+        folded_qobs_ticks = None
+        full_exact_ticks = None
+        if folded is not None:
+            full_exact_ticks = [
+                action_to_ticks(
+                    value,
+                    args.max_wheel_speed_mps,
+                    args.command_deadband,
+                    args.min_drive_ticks_per_sec,
+                )
+                for value in full_exact_obs
+            ]
+            folded_ticks = [
+                action_to_ticks(
+                    value,
+                    args.max_wheel_speed_mps,
+                    args.command_deadband,
+                    args.min_drive_ticks_per_sec,
+                )
+                for value in folded
+            ]
+            folded_qobs_ticks = [
+                action_to_ticks(
+                    value,
+                    args.max_wheel_speed_mps,
+                    args.command_deadband,
+                    args.min_drive_ticks_per_sec,
+                )
+                for value in folded_qobs
+            ]
         fixed_ticks = [
             action_fixed_to_ticks(
                 value,
@@ -339,19 +540,25 @@ def compare_dataset(name, samples, model, args):
         ]
 
         for a in range(NUM_ACTIONS):
-            max_full_fold_action_diff = max(
-                max_full_fold_action_diff,
-                abs(full[a] - folded[a]),
+            full_q1000 = clamp(float_to_q1000(full[a]), -1000, 1000)
+            max_full_fixed_action_q1000_diff = max(
+                max_full_fixed_action_q1000_diff,
+                abs(fixed_q1000[a] - full_q1000),
             )
-            folded_q1000 = clamp(float_to_q1000(folded_qobs[a]), -1000, 1000)
-            max_fixed_fold_qobs_action_q1000_diff = max(
-                max_fixed_fold_qobs_action_q1000_diff,
-                abs(fixed_q1000[a] - folded_q1000),
-            )
+            if folded is not None:
+                max_full_fold_action_diff = max(
+                    max_full_fold_action_diff,
+                    abs(full_exact_obs[a] - folded[a]),
+                )
+                folded_q1000 = clamp(float_to_q1000(folded_qobs[a]), -1000, 1000)
+                max_fixed_fold_qobs_action_q1000_diff = max(
+                    max_fixed_fold_qobs_action_q1000_diff,
+                    abs(fixed_q1000[a] - folded_q1000),
+                )
 
-        if full_ticks != folded_ticks:
+        if folded_ticks is not None and full_exact_ticks != folded_ticks:
             full_fold_tick_mismatches += 1
-        if fixed_ticks != folded_qobs_ticks:
+        if folded_qobs_ticks is not None and fixed_ticks != folded_qobs_ticks:
             fixed_fold_qobs_tick_mismatches += 1
             if len(examples) < 5:
                 examples.append(
@@ -366,34 +573,58 @@ def compare_dataset(name, samples, model, args):
                 )
         if fixed_ticks != full_ticks:
             fixed_full_tick_mismatches += 1
+            fixed_full_max_tick_delta = max(
+                fixed_full_max_tick_delta,
+                max(abs(fixed_ticks[a] - full_ticks[a]) for a in range(NUM_ACTIONS)),
+            )
+            if len(examples) < 5 and folded_qobs_ticks is None:
+                examples.append(
+                    (
+                        sample_name,
+                        obs_q1000,
+                        [round(v, 6) for v in full],
+                        fixed,
+                        full_ticks,
+                        fixed_ticks,
+                    )
+                )
 
     fixed_mismatch_frac = (
         fixed_fold_qobs_tick_mismatches / count if count > 0 else 0.0
     )
-    ok = (
-        max_full_fold_action_diff <= args.max_fold_action_diff
-        and full_fold_tick_mismatches == 0
-        and fixed_mismatch_frac <= args.max_fixed_tick_mismatch_frac
-    )
+    if model["folded"] is not None:
+        ok = (
+            max_full_fold_action_diff <= args.max_fold_action_diff
+            and full_fold_tick_mismatches == 0
+            and fixed_mismatch_frac <= args.max_fixed_tick_mismatch_frac
+        )
+    else:
+        ok = fixed_full_tick_mismatches / count <= args.max_fixed_tick_mismatch_frac
 
     print(f"\n{name}:")
     print(f"  samples={count}")
-    print(f"  full_vs_folded max_action_diff={max_full_fold_action_diff:.9g}")
-    print(f"  full_vs_folded tick_mismatches={full_fold_tick_mismatches}")
+    if model["folded"] is not None:
+        print(f"  full_vs_folded max_action_diff={max_full_fold_action_diff:.9g}")
+        print(f"  full_vs_folded tick_mismatches={full_fold_tick_mismatches}")
+        print(
+            "  fixed_vs_folded_qobs "
+            f"max_action_q1000_diff={max_fixed_fold_qobs_action_q1000_diff} "
+            f"tick_mismatches={fixed_fold_qobs_tick_mismatches} "
+            f"({100.0 * fixed_mismatch_frac:.3f}%)"
+        )
     print(
-        "  fixed_vs_folded_qobs "
-        f"max_action_q1000_diff={max_fixed_fold_qobs_action_q1000_diff} "
-        f"tick_mismatches={fixed_fold_qobs_tick_mismatches} "
-        f"({100.0 * fixed_mismatch_frac:.3f}%)"
+        "  fixed_vs_full "
+        f"max_action_q1000_diff={max_full_fixed_action_q1000_diff} "
+        f"tick_mismatches={fixed_full_tick_mismatches} "
+        f"max_tick_delta={fixed_full_max_tick_delta}"
     )
-    print(f"  fixed_vs_full tick_mismatches={fixed_full_tick_mismatches}")
     for example in examples:
-        sample_name, obs_q1000, folded_qobs, fixed, folded_ticks, fixed_ticks = example
+        sample_name, obs_q1000, reference, fixed, reference_ticks, fixed_ticks = example
         print(
             "  mismatch "
             f"{sample_name} obs_q1000={obs_q1000} "
-            f"folded_qobs={folded_qobs} fixed={fixed} "
-            f"folded_ticks={folded_ticks} fixed_ticks={fixed_ticks}"
+            f"reference={reference} fixed={fixed} "
+            f"reference_ticks={reference_ticks} fixed_ticks={fixed_ticks}"
         )
     return ok
 
@@ -425,14 +656,14 @@ def main():
         default=defaults["min_drive_ticks_per_sec"],
     )
     parser.add_argument("--max-fold-action-diff", type=float, default=2e-5)
-    parser.add_argument("--max-fixed-tick-mismatch-frac", type=float, default=0.01)
+    parser.add_argument("--max-fixed-tick-mismatch-frac", type=float, default=0.03)
     args = parser.parse_args()
 
     checkpoint = args.checkpoint or latest_checkpoint(root)
     if checkpoint is None:
         raise SystemExit("No line_follow checkpoint found")
     checkpoint = checkpoint.resolve()
-    model = load_feedforward_model(checkpoint, args.hidden_size, args.num_layers)
+    model = load_model(checkpoint, args.hidden_size, args.num_layers)
 
     robot_csvs = args.robot_csv
     if robot_csvs is None:

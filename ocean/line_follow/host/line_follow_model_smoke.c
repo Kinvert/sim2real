@@ -67,25 +67,9 @@ static int mps_to_ticks(float mps) {
     return (int)lrintf(ticks);
 }
 
-static int align4_int(int value) {
-    return (value + 3) & ~3;
-}
-
 static int expected_raw_float_count(void) {
-    int index = 0;
-    index += HIDDEN_SIZE * OBS_SIZE;
-    index = align4_int(index);
-    index += (NUM_ACTIONS + 1) * HIDDEN_SIZE;
-    index = align4_int(index);
-    index += NUM_ACTIONS;
-    if (NUM_LAYERS > 0) {
-        index = align4_int(index);
-        for (int layer = 0; layer < NUM_LAYERS; layer++) {
-            index += 3 * HIDDEN_SIZE * HIDDEN_SIZE;
-            index = align4_int(index);
-        }
-    }
-    return index;
+    return puffernet_storage_weight_count(
+        OBS_SIZE, HIDDEN_SIZE, NUM_LAYERS, NUM_ACTIONS);
 }
 
 static void reset_recurrent_state(PufferNet* net) {
@@ -127,13 +111,15 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    int raw_floats = weights->size - 7;
+    int raw_floats = weights->raw_size;
     int expected = expected_raw_float_count();
-    if (raw_floats != expected) {
+    int aligned_read = puffernet_aligned_read_weight_count(
+        OBS_SIZE, HIDDEN_SIZE, NUM_LAYERS, NUM_ACTIONS);
+    if (raw_floats != expected && raw_floats != aligned_read) {
         fprintf(stderr,
-            "Checkpoint size does not match compiled model shape: raw_floats=%d expected=%d hidden_size=%d num_layers=%d\n",
-            raw_floats, expected, HIDDEN_SIZE, NUM_LAYERS);
-        free(weights);
+            "Checkpoint size does not match compiled model shape: raw_floats=%d expected_native=%d aligned_read=%d hidden_size=%d num_layers=%d\n",
+            raw_floats, expected, aligned_read, HIDDEN_SIZE, NUM_LAYERS);
+        free_weights(weights);
         return 1;
     }
 
@@ -174,6 +160,6 @@ int main(int argc, char** argv) {
     }
 
     free_puffernet(net);
-    free(weights);
+    free_weights(weights);
     return 0;
 }

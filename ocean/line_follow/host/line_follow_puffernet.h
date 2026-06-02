@@ -10,9 +10,14 @@
 
 typedef struct Weights {
     float* data;
+    int raw_size;
     int size;
     int idx;
 } Weights;
+
+static int puffernet_align8(int value) {
+    return (value + 7) & ~7;
+}
 
 static Weights* load_weights(const char* filename) {
     FILE* file = fopen(filename, "rb");
@@ -25,22 +30,53 @@ static Weights* load_weights(const char* filename) {
     rewind(file);
     size_t num_weights = (size_t)file_size / sizeof(float);
     Weights* weights = (Weights*)calloc(1,
-        sizeof(Weights) + (num_weights + 7) * sizeof(float));
+        sizeof(Weights) + (num_weights + 64) * sizeof(float));
     weights->data = (float*)(weights + 1);
     size_t read_size = fread(weights->data, sizeof(float), num_weights, file);
     fclose(file);
     if (read_size != num_weights) {
         perror("Error reading file");
     }
-    weights->size = (int)num_weights + 7;
+    weights->raw_size = (int)num_weights;
+    weights->size = (int)num_weights + 64;
     weights->idx = 0;
     return weights;
+}
+
+static void free_weights(Weights* weights) {
+    if (weights == NULL) {
+        return;
+    }
+    free(weights);
+}
+
+static int puffernet_storage_weight_count(int input_dim, int hidden_dim,
+        int num_layers, int num_actions) {
+    int decoder_rows = num_actions + 1;
+    int index = 0;
+    index = puffernet_align8(index);
+    index += hidden_dim * input_dim;
+    index = puffernet_align8(index);
+    index += decoder_rows * hidden_dim;
+    index = puffernet_align8(index);
+    index += num_actions;
+    for (int layer = 0; layer < num_layers; layer++) {
+        index = puffernet_align8(index);
+        index += 3 * hidden_dim * hidden_dim;
+    }
+    return index;
+}
+
+static int puffernet_aligned_read_weight_count(int input_dim, int hidden_dim,
+        int num_layers, int num_actions) {
+    return puffernet_align8(
+        puffernet_storage_weight_count(input_dim, hidden_dim, num_layers, num_actions));
 }
 
 static float* get_weights_aligned(Weights* weights, int num_weights) {
     float* data = &weights->data[weights->idx];
     weights->idx += num_weights;
-    weights->idx = (weights->idx + 3) & ~3;
+    weights->idx = puffernet_align8(weights->idx);
     assert(weights->idx <= weights->size);
     return data;
 }
@@ -176,6 +212,22 @@ static PufferNet* make_puffernet(Weights* weights, int num_agents, int input_dim
         }
     }
     assert(net->is_continuous && "line_follow host smoke only supports continuous policies");
+    int storage_size = puffernet_storage_weight_count(
+        input_dim, hidden_dim, num_layers, num_actions);
+    int aligned_read_size = puffernet_aligned_read_weight_count(
+        input_dim, hidden_dim, num_layers, num_actions);
+    if (weights->raw_size != storage_size && weights->raw_size != aligned_read_size) {
+        fprintf(stderr,
+            "Checkpoint weight layout does not match model shape: raw_floats=%d storage=%d aligned_read=%d hidden_size=%d num_layers=%d\n",
+            weights->raw_size,
+            storage_size,
+            aligned_read_size,
+            hidden_dim,
+            num_layers);
+        assert(false && "checkpoint weight layout does not match model shape");
+        abort();
+    }
+    weights->idx = 0;
 
     net->encoder = make_linear(weights, num_agents, input_dim, hidden_dim);
     net->decoder = make_linear(weights, num_agents, hidden_dim, num_actions + 1);

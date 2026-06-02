@@ -1760,12 +1760,13 @@ static void weight_bank_create_for_pufferl(WeightBank* bank, PuffeRL* pufferl,
     alloc_create(params);
     alloc_create(acts);
 
-    bank->param_puf = {.data = (precision_t*)params->mem, .shape = {params->total_elems}};
+    long param_span = params->total_bytes / sizeof(precision_t);
+    bank->param_puf = {.data = (precision_t*)params->mem, .shape = {param_span}};
     if (USE_BF16) {
-        bank->master_weights = {.shape = {params->total_elems}};
-        cudaMalloc(&bank->master_weights.data, params->total_elems * sizeof(float));
+        bank->master_weights = {.shape = {param_span}};
+        cudaMalloc(&bank->master_weights.data, param_span * sizeof(float));
     } else {
-        bank->master_weights = {.data = (float*)bank->param_puf.data, .shape = {params->total_elems}};
+        bank->master_weights = {.data = (float*)bank->param_puf.data, .shape = {param_span}};
     }
 }
 
@@ -2040,15 +2041,17 @@ std::unique_ptr<PuffeRL> create_pufferl_impl(HypersT& hypers,
         return nullptr;
     }
 
-    pufferl->grad_puf = {.data = (precision_t*)grads->mem, .shape = {grads->total_elems}};
-    pufferl->param_puf = {.data = (precision_t*)params->mem, .shape = {params->total_elems}};
+    long grad_span = grads->total_bytes / sizeof(precision_t);
+    long param_span = params->total_bytes / sizeof(precision_t);
+    pufferl->grad_puf = {.data = (precision_t*)grads->mem, .shape = {grad_span}};
+    pufferl->param_puf = {.data = (precision_t*)params->mem, .shape = {param_span}};
 
     ulong init_seed = hypers.seed;
     policy_init_weights(&pufferl->policy, pufferl->weights, &init_seed, pufferl->default_stream);
-    pufferl->master_weights = {.data = (float*)pufferl->param_puf.data, .shape = {params->total_elems}};
+    pufferl->master_weights = {.data = (float*)pufferl->param_puf.data, .shape = {param_span}};
     if (USE_BF16) {
-        pufferl->master_weights = {.shape = {params->total_elems}};
-        cudaMalloc(&pufferl->master_weights.data, params->total_elems * sizeof(float));
+        pufferl->master_weights = {.shape = {param_span}};
+        cudaMalloc(&pufferl->master_weights.data, param_span * sizeof(float));
         int n = numel(pufferl->param_puf.shape);
         cast<<<grid_size(n), BLOCK_SIZE, 0, pufferl->default_stream>>>(
             pufferl->master_weights.data, pufferl->param_puf.data, n);
